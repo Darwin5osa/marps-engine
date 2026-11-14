@@ -37,6 +37,26 @@ Interface between the navigation engine and any frontend (game engine, web viewe
 | `missionTimeS` | number | no | echoed back as-is |
 | `activeWaypointId` | string | no | if sent, jumps to that step (e.g. `"B"` to return to base) |
 | `forceReplan` | bool | no | forces a route recalculation |
+| `stopOrder` | string[] | no | new visiting order for the stops still ahead (see below) |
+| `emergencyReturn` | bool | no | emergency button: guide the astronaut straight to the base (see below) |
+| `cancelEmergency` | bool | no | leave emergency mode and resume the mission |
+
+### Reordering stops (`stopOrder`)
+
+- The listed stops are visited first, in the given order; stops not listed keep their relative order after them. `["P3"]` moves P3 to the front; `["P4", "P2", "P3", "P1"]` is a full reorder.
+- Completed stops and the departure / return base are fixed and ignored if listed, so the frontend can resend the same list safely.
+- The route to the new active stop is recalculated on the same call (`route.replanned = true`). `objectives` comes back in the new order.
+- Unknown ids, places that are not mission stops, empty ids or duplicates reject the whole list: the order is left unchanged and an `INVALID_STOP_ORDER` alert is returned.
+- The order is per session.
+
+### Emergency return (`emergencyReturn` / `cancelEmergency`)
+
+- Send `emergencyReturn: true` once (button press). The mode stays on until `cancelEmergency: true`; it is per session.
+- The target becomes the base (the departure step if it is a base, else the return step, else any place of type `base`). The route is computed on that same call even with background replanning.
+- While active: stops passed on the way are not credited, `activeWaypointId` is ignored, pending stops stay `pending` and the return step is `active`. `stopOrder` still applies, for when the mission resumes.
+- The response carries `emergency: { active, baseId, arrived, activatedAtS }` (omitted when not active) and an `EMERGENCY_RETURN` alert first in the list (`danger`, or `info` once `arrived`).
+- On cancel, navigation resumes at the stop that was active.
+- A mission without a base returns a `NO_BASE` alert and stays in normal mode.
 
 Optional space weather fields (`spaceWeather`: `{ "stormActive": true, "level": "G3", "source": "DONKI" }`) are filled in by a weather provider, not by the frontend.
 
@@ -96,6 +116,9 @@ Example (position at base, looking east):
   - `SOLAR_STORM` (warning): only if the weather provider reports it.
   - `NO_ROUTE` (danger): no safe route to the target.
   - `OFF_MAP` (warning): outside the map.
+  - `EMERGENCY_RETURN` (danger, or info on arrival): emergency return to base is active.
+  - `NO_BASE` (danger): emergency requested but the mission has no base.
+  - `INVALID_STOP_ORDER` (warning): the `stopOrder` sent was rejected.
 - **Nearby hazards** (`hazards`): zones within 150 m, sorted by distance. `severity` = `high` if any slope exceeds 22°.
 - **Objectives** (`objectives[].status`): `done`, `active`, `pending`. The base appears on departure (step 0) and on return (last step).
 - **Layers** (`layers`): slope underfoot, hazard class, elevation, masts in line of sight.
@@ -110,6 +133,7 @@ Example (position at base, looking east):
 | POST | `/api/sensor` | sets the test astronaut's state |
 | GET | `/api/hud` | runs one service step and returns `{ hud, serverMs }` |
 | POST | `/api/navigate` | shortcut: `NavigationRequest` → `{ hud, serverMs }` |
+| POST | `/api/itinerary` | `{fromX, fromZ, order: [ids]}` → every leg through the given places, with totals (reorder preview) |
 
 ## Data files
 

@@ -19,6 +19,24 @@ namespace Marps.Engine.Navigation
         public string ActiveWaypointId { get; set; }
         /// <summary>Forces a route recalculation even if nothing changed.</summary>
         public bool ForceReplan { get; set; }
+
+        /// <summary>
+        /// Optional new visiting order for the stops that are still ahead (ids). Listed stops are visited first,
+        /// in the given order; stops not listed keep their relative order after them. Completed stops and the
+        /// fixed departure / return base are ignored, so the same list can be sent again safely. The route to the
+        /// new active stop is recalculated. An invalid list is rejected with an INVALID_STOP_ORDER alert.
+        /// </summary>
+        public List<string> StopOrder { get; set; }
+
+        /// <summary>
+        /// Emergency button: abandons the remaining stops and guides the astronaut straight to the base.
+        /// The mode stays on (the flag does not need to be sent again) until <see cref="CancelEmergency"/>.
+        /// </summary>
+        public bool EmergencyReturn { get; set; }
+
+        /// <summary>Leaves emergency mode and resumes the mission at the stop that was active.</summary>
+        public bool CancelEmergency { get; set; }
+
         public SpaceWeather SpaceWeather { get; set; }
     }
 
@@ -43,7 +61,20 @@ namespace Marps.Engine.Navigation
         public List<HazardInfo> Hazards { get; set; } = new List<HazardInfo>();
         public List<AlertInfo> Alerts { get; set; } = new List<AlertInfo>();
         public LayerInfo Layers { get; set; }
+        /// <summary>Present only while emergency return to base is active.</summary>
+        public EmergencyInfo Emergency { get; set; }
         public double ComputeMs { get; set; }
+    }
+
+    public sealed class EmergencyInfo
+    {
+        public bool Active { get; set; }
+        /// <summary>Id of the base the astronaut is being guided to.</summary>
+        public string BaseId { get; set; }
+        /// <summary>True once the astronaut is within the reach radius of the base.</summary>
+        public bool Arrived { get; set; }
+        /// <summary>Mission time at which the emergency was activated (echo of missionTimeS).</summary>
+        public double ActivatedAtS { get; set; }
     }
 
     public sealed class PositionInfo
@@ -115,7 +146,10 @@ namespace Marps.Engine.Navigation
 
     public sealed class AlertInfo
     {
-        /// <summary>HAZARD_AHEAD, SIGNAL_LOSS, SIGNAL_LIMITED, SOLAR_STORM, OFF_MAP, NO_ROUTE.</summary>
+        /// <summary>
+        /// HAZARD_AHEAD, SIGNAL_LOSS, SIGNAL_LIMITED, SOLAR_STORM, OFF_MAP, NO_ROUTE, EMERGENCY_RETURN,
+        /// NO_BASE, INVALID_STOP_ORDER.
+        /// </summary>
         public string Code { get; set; }
         /// <summary>info, warning o danger.</summary>
         public string Severity { get; set; }

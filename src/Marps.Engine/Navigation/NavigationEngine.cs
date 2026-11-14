@@ -36,11 +36,34 @@ namespace Marps.Engine.Navigation
             _options = options ?? new NavigationOptions();
             if (routeOptions == null) routeOptions = new RouteOptions { MaxSlopeDeg = _options.MaxSlopeDeg };
             _router = new AStarRouter(map, model, routeOptions);
+            _base = FindBase(mission);
             if (_options.BackgroundReplanning) StartPlanWorker(model, routeOptions);
         }
 
         public TerrainMap Map => _map;
         public MissionDefinition Mission => _mission;
+
+        /// <summary>The base used for emergency return, or null if the mission has none.</summary>
+        public Waypoint Base => _base;
+
+        private readonly Waypoint _base;
+
+        /// <summary>
+        /// The emergency base: the departure step if it is a base, else the final step if it is one,
+        /// else any place of type "base".
+        /// </summary>
+        private static Waypoint FindBase(MissionDefinition mission)
+        {
+            var steps = mission.ObjectiveIds;
+            if (steps.Count > 0)
+            {
+                var first = mission.Find(steps[0]);
+                if (first.Type == "base") return first;
+                var last = mission.Find(steps[steps.Count - 1]);
+                if (last.Type == "base") return last;
+            }
+            return mission.Waypoints.FirstOrDefault(w => w.Type == "base");
+        }
 
         // ---- background route planning ----
 
@@ -51,6 +74,7 @@ namespace Marps.Engine.Navigation
             public string TargetId;
             public Point2 From;
             public Point2 To;
+            public long Generation;
             public RouteResult Result;
         }
 
@@ -107,6 +131,7 @@ namespace Marps.Engine.Navigation
                 TargetId = target.Id,
                 From = from,
                 To = target.Position,
+                Generation = session.PlanGeneration,
             });
             session.PlanPending = queued;
         }
@@ -123,9 +148,12 @@ namespace Marps.Engine.Navigation
             while (_planResults.TryDequeue(out var job))
             {
                 if (!_sessions.TryGetValue(job.SessionId, out var s) || !ReferenceEquals(s, job.Session)) continue;
-                if (job.Result == null)
+                if (job.Result == null || job.TargetId != s.WantedTargetId || job.Generation != s.PlanGeneration)
                 {
-                    s.PlanPending = false;      // the search was skipped; the session will ask again
+                    // Skipped search, or a route that is no longer wanted: the target changed while it ran
+                    // (stops reordered, emergency) or a newer route was planned synchronously meanwhile.
+                    // The session asks again on its next call if it still needs one.
+                    s.PlanPending = false;
                     continue;
                 }
                 s.Route = job.Result;
@@ -153,6 +181,68 @@ namespace Marps.Engine.Navigation
             lock (_lock) return _router.Find(from, to);
         }
 
+        /// <summary>
+        /// Plans every leg of a visiting order, starting at <paramref name="from"/> and going through the given
+        /// places in sequence (for previewing a reordered mission). Throws if an id is not a known place.
+        /// </summary>
+        public List<ItineraryLeg> PlanItinerary(Point2 from, IEnumerable<string> placeIds)
+        {
+            if (placeIds == null) throw new ArgumentNullException(nameof(placeIds));
+            var targets = new List<Waypoint>();
+            foreach (var id in placeIds)
+                targets.Add(_mission.Find(id) ?? throw new ArgumentException($"Unknown place '{id}'.", nameof(placeIds)));
+
+            var legs = new List<ItineraryLeg>(targets.Count);
+            lock (_lock)
+            {
+                Point2 current = from;
+                foreach (var target in targets)
+                {
+                    legs.Add(new ItineraryLeg { TargetId = target.Id, From = current, Route = _router.Find(current, target.Position) });
+                    current = target.Position;
+                }
+            }
+            return legs;
+        }
+
+        /// <summary>
+        /// Reorders the stops still ahead in a session (see <see cref="NavigationRequest.StopOrder"/>).
+        /// Returns null on success or the reason the order was rejected (the order is then left unchanged).
+        /// Called with the lock held.
+        /// </summary>
+        private string ApplyStopOrder(SessionState s, List<string> requested)
+        {
+            var order = s.Order;
+            int lo = Math.Max(s.Step, IsBaseStep(order, 0) ? 1 : 0);   // the departure base stays first
+            int hi = order.Count - 1;
+            if (order.Count > 1 && IsBaseStep(order, hi)) hi--;          // the return to base stays last
+            int count = Math.Max(0, hi - lo + 1);
+
+            var pool = count > 0 ? order.GetRange(lo, count) : new List<string>();
+            var head = new List<string>(count);
+            var seen = new HashSet<string>();
+            foreach (var id in requested)
+            {
+                if (string.IsNullOrEmpty(id)) return "Empty stop id in the new order.";
+                if (!seen.Add(id)) return $"Stop '{id}' is listed twice.";
+                if (!_mission.ObjectiveIds.Contains(id)) return $"'{id}' is not a stop of this mission.";
+                int at = pool.IndexOf(id);
+                if (at < 0) continue;                                    // already done or a fixed base: ignored
+                head.Add(id);
+                pool.RemoveAt(at);
+            }
+            head.AddRange(pool);
+            if (count > 0)
+            {
+                order.RemoveRange(lo, count);
+                order.InsertRange(lo, head);
+            }
+            return null;
+        }
+
+        private bool IsBaseStep(List<string> order, int index) =>
+            index >= 0 && index < order.Count && _mission.Find(order[index]).Type == "base";
+
         public NavigationResponse Update(NavigationRequest req)
         {
             if (req == null) throw new ArgumentNullException(nameof(req));
@@ -164,7 +254,7 @@ namespace Marps.Engine.Navigation
                 if (!_sessions.TryGetValue(sid, out var session))
                 {
                     if (_sessions.Count >= Math.Max(1, _options.MaxSessions)) EvictLeastRecentlyUsed();
-                    session = new SessionState();
+                    session = new SessionState { Order = new List<string>(_mission.ObjectiveIds) };
                     _sessions[sid] = session;
                 }
                 session.LastUsed = ++_useCounter;
@@ -183,7 +273,36 @@ namespace Marps.Engine.Navigation
                     },
                 };
 
-                var steps = _mission.ObjectiveIds;
+                var steps = session.Order;
+                var commandAlerts = new List<AlertInfo>();
+
+                // 0. Commands: emergency on / off and a new stop order.
+                bool emergencyStarted = false;
+                if (req.CancelEmergency) session.Emergency = false;
+                if (req.EmergencyReturn && !session.Emergency)
+                {
+                    if (_base == null)
+                    {
+                        commandAlerts.Add(new AlertInfo
+                        {
+                            Code = "NO_BASE",
+                            Severity = "danger",
+                            Message = "The mission has no base: emergency return is not available.",
+                        });
+                    }
+                    else
+                    {
+                        session.Emergency = true;
+                        session.EmergencySinceS = req.MissionTimeS;
+                        emergencyStarted = true;
+                    }
+                }
+                if (req.StopOrder != null)
+                {
+                    string error = ApplyStopOrder(session, req.StopOrder);
+                    if (error != null)
+                        commandAlerts.Add(new AlertInfo { Code = "INVALID_STOP_ORDER", Severity = "warning", Message = error });
+                }
 
                 // 1. Progress by proximity: the current step is completed if the path travelled since the last
                 //    sample passes within ReachRadiusM of its point (so a slow sampling rate cannot skip it).
@@ -191,7 +310,8 @@ namespace Marps.Engine.Navigation
                 // proximity to the current position (otherwise the departure base would be credited again on return).
                 Point2 previous = session.HasLast ? session.LastPos : pos;
                 bool firstStep = true;
-                while (session.Step < steps.Count)
+                // In an emergency nothing is credited: passing by a stop on the way home does not complete it.
+                while (!session.Emergency && session.Step < steps.Count)
                 {
                     var stepPos = _mission.Find(steps[session.Step]).Position;
                     double d = firstStep
@@ -205,7 +325,7 @@ namespace Marps.Engine.Navigation
                 session.HasLast = true;
 
                 // 2. The astronaut can jump to a later step with that id (e.g. return to base "B").
-                if (!string.IsNullOrEmpty(req.ActiveWaypointId))
+                if (!session.Emergency && !string.IsNullOrEmpty(req.ActiveWaypointId))
                 {
                     for (int k = session.Step; k < steps.Count; k++)
                     {
@@ -217,19 +337,23 @@ namespace Marps.Engine.Navigation
                     }
                 }
 
-                Waypoint target = session.Step < steps.Count ? _mission.Find(steps[session.Step]) : null;
+                Waypoint target = session.Emergency
+                    ? _base
+                    : (session.Step < steps.Count ? _mission.Find(steps[session.Step]) : null);
+                session.WantedTargetId = target?.Id;
 
                 // 3. Route: recalculated if the target changed, if requested, or if the astronaut moved away from the route.
                 bool replanned = ApplyCompletedPlans(sid);
                 if (target != null)
                 {
-                    bool needPlan = session.Route == null || session.TargetId != target.Id || req.ForceReplan;
+                    bool needPlan = session.Route == null || session.TargetId != target.Id || req.ForceReplan || emergencyStarted;
                     if (!needPlan)
                     {
                         session.Nearest(pos, out _, out double offDist);
                         needPlan = offDist > _options.OffRouteM;
                     }
-                    if (needPlan && _options.BackgroundReplanning)
+                    // The emergency route is computed at once, even in background mode: the HUD must not wait for it.
+                    if (needPlan && _options.BackgroundReplanning && !emergencyStarted)
                     {
                         // Do not block: the search runs on the worker thread and is applied on a later call.
                         // Meanwhile the previous route (if any) is returned with Pending = true.
@@ -239,6 +363,7 @@ namespace Marps.Engine.Navigation
                     {
                         session.Route = _router.Find(pos, target.Position);
                         session.TargetId = target.Id;
+                        session.PlanGeneration++;           // results of searches queued before this one are stale
                         session.PrepareCumulative(_options.PolylineToleranceM);
                         replanned = true;
                     }
@@ -255,9 +380,16 @@ namespace Marps.Engine.Navigation
                     session.PrepareCumulative(_options.PolylineToleranceM);
                 }
 
+                // In an emergency the remaining stops stay pending (they resume on cancel); the return step is active.
+                int last = steps.Count - 1;
+                bool returnStepActive = session.Emergency && last >= session.Step && steps[last] == _base.Id;
                 for (int k = 0; k < steps.Count; k++)
                 {
                     var w = _mission.Find(steps[k]);
+                    string status;
+                    if (k < session.Step) status = "done";
+                    else if (session.Emergency) status = returnStepActive && k == last ? "active" : "pending";
+                    else status = k == session.Step ? "active" : "pending";
                     response.Objectives.Add(new ObjectiveInfo
                     {
                         Step = k,
@@ -265,14 +397,26 @@ namespace Marps.Engine.Navigation
                         Name = w.Name,
                         X = w.Position.X,
                         Z = w.Position.Z,
-                        Status = k < session.Step ? "done" : (k == session.Step ? "active" : "pending"),
+                        Status = status,
                     });
                 }
 
                 response.Hazards = NearbyHazards(pos);
                 response.Layers = BuildLayers(pos, out int visible);
                 response.Layers.VisibleAntennas = visible;
+                if (session.Emergency)
+                {
+                    response.Emergency = new EmergencyInfo
+                    {
+                        Active = true,
+                        BaseId = _base.Id,
+                        Arrived = pos.DistanceTo(_base.Position) <= _options.ReachRadiusM,
+                        ActivatedAtS = session.EmergencySinceS,
+                    };
+                }
+
                 response.Alerts = BuildAlerts(req, pos, response, target != null);
+                response.Alerts.AddRange(commandAlerts);
 
                 clock.Stop();
                 response.ComputeMs = clock.Elapsed.TotalMilliseconds;
@@ -405,6 +549,21 @@ namespace Marps.Engine.Navigation
         {
             var alerts = new List<AlertInfo>();
 
+            if (resp.Emergency != null)
+            {
+                var r = resp.Route;
+                alerts.Add(resp.Emergency.Arrived
+                    ? new AlertInfo { Code = "EMERGENCY_RETURN", Severity = "info", Message = "Emergency: arrived at base." }
+                    : new AlertInfo
+                    {
+                        Code = "EMERGENCY_RETURN",
+                        Severity = "danger",
+                        Message = r != null && r.Found
+                            ? $"Emergency: return to base {resp.Emergency.BaseId}, {r.RemainingM:0} m, about {r.EstimatedMinutes:0} min."
+                            : $"Emergency: return to base {resp.Emergency.BaseId}.",
+                    });
+            }
+
             if (!resp.Position.Inside)
                 alerts.Add(new AlertInfo { Code = "OFF_MAP", Severity = "warning", Message = "Outside the map area." });
 
@@ -497,8 +656,21 @@ namespace Marps.Engine.Navigation
             /// <summary>Set when the session is discarded from the cache. Read by the worker thread.</summary>
             public volatile bool Evicted;
 
-            /// <summary>Index of the current step. Previous steps are completed.</summary>
+            /// <summary>Index of the current step in <see cref="Order"/>. Previous steps are completed.</summary>
             public int Step { get; set; }
+
+            /// <summary>This session's step sequence (starts as the mission order; the astronaut may reorder it).</summary>
+            public List<string> Order { get; set; }
+
+            /// <summary>Emergency return to base is active.</summary>
+            public bool Emergency { get; set; }
+            public double EmergencySinceS { get; set; }
+
+            /// <summary>Target the session needs a route to right now (background results for others are dropped).</summary>
+            public string WantedTargetId { get; set; }
+
+            /// <summary>Bumped on each synchronous plan, so older background results are not applied over it.</summary>
+            public long PlanGeneration { get; set; }
             public Point2 LastPos { get; set; }
             public bool HasLast { get; set; }
             public string TargetId { get; set; }
