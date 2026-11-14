@@ -92,8 +92,11 @@ app.MapGet("/api/mission", () =>
 // Direct route between two local points (x east, z north).
 app.MapPost("/api/route", (RouteQuery q) =>
 {
+    if (q == null || !RouteQuery.IsFinite(q.FromX) || !RouteQuery.IsFinite(q.FromZ) || !RouteQuery.IsFinite(q.ToX) || !RouteQuery.IsFinite(q.ToZ))
+        return Results.BadRequest(new { error = "fromX, fromZ, toX and toZ are required finite numbers." });
+
     var clock = Stopwatch.StartNew();
-    RouteResult r = engine.PlanRoute(new Point2(q.FromX, q.FromZ), new Point2(q.ToX, q.ToZ));
+    RouteResult r = engine.PlanRoute(new Point2(q.FromX.Value, q.FromZ.Value), new Point2(q.ToX.Value, q.ToZ.Value));
     clock.Stop();
     return Results.Json(new
     {
@@ -114,6 +117,7 @@ app.MapPost("/api/route", (RouteQuery q) =>
 // Astronaut state "sent" by the test helmet.
 app.MapPost("/api/sensor", (NavigationRequest req) =>
 {
+    if (req == null) return Results.BadRequest(new { error = "A JSON body with x, z and headingDeg is required." });
     sensor.Set(req);
     return Results.Json(new { ok = true }, MarpsJson.Options);
 });
@@ -130,6 +134,7 @@ app.MapGet("/api/hud", () =>
 // Shortcut to test the engine without going through the sensor.
 app.MapPost("/api/navigate", (NavigationRequest req) =>
 {
+    if (req == null) return Results.BadRequest(new { error = "A JSON body with x, z and headingDeg is required." });
     var clock = Stopwatch.StartNew();
     NavigationResponse resp = engine.Update(req);
     clock.Stop();
@@ -174,13 +179,18 @@ static List<object> LoadReferenceLegs(string referencePath)
     return list;
 }
 
+// Nullable so that a missing field is reported as 400 instead of silently becoming 0.
 public sealed class RouteQuery
 {
-    public double FromX { get; set; }
-    public double FromZ { get; set; }
-    public double ToX { get; set; }
-    public double ToZ { get; set; }
+    public double? FromX { get; set; }
+    public double? FromZ { get; set; }
+    public double? ToX { get; set; }
+    public double? ToZ { get; set; }
+
+    public static bool IsFinite(double? v) => v.HasValue && double.IsFinite(v.Value);
 }
+
+
 
 /// <summary>Test sensor: the state is set by the web page (POST /api/sensor).</summary>
 public sealed class WebSensor : IAstronautSensor
