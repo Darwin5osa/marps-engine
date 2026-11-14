@@ -1,0 +1,8 @@
+# Local context (summaries and data from other tools; not versioned)
+context/
+
+# .NET build artifacts
+bin/
+obj/
+*.user
+.vs/

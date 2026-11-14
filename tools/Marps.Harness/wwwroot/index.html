@@ -1,0 +1,640 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Marps · Navigation harness</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --line: #30363d; --text: #e6edf3; --muted: #8b949e;
+    --cyan: #39d0d8; --amber: #d29922; --red: #f85149; --green: #3fb950; --blue: #58a6ff; --violet: #a371f7;
+  }
+  @media (prefers-color-scheme: light) {
+    :root { --bg: #f6f8fa; --panel: #ffffff; --line: #d0d7de; --text: #1f2328; --muted: #656d76; }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.4 system-ui, Segoe UI, sans-serif; }
+  header { padding: 10px 16px; border-bottom: 1px solid var(--line); display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  header h1 { font-size: 16px; margin: 0; }
+  #api { color: var(--muted); font-size: 12px; }
+  main { display: grid; grid-template-columns: minmax(320px, 1fr) minmax(320px, 420px); gap: 12px; padding: 12px; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-bottom: 12px; }
+  .card h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; }
+  canvas#map { width: 100%; max-width: 780px; aspect-ratio: 1 / 1; height: auto; border: 1px solid var(--line); border-radius: 6px; cursor: crosshair; background: #000; }
+  .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 6px 0; }
+  .row label { color: var(--muted); font-size: 12px; min-width: 88px; }
+  input[type=number] { width: 96px; padding: 4px 6px; background: transparent; color: var(--text); border: 1px solid var(--line); border-radius: 4px; }
+  select, button { padding: 6px 10px; border-radius: 6px; border: 1px solid var(--line); background: transparent; color: var(--text); font: inherit; cursor: pointer; }
+  button.primary { background: var(--blue); border-color: var(--blue); color: #fff; }
+  button.mode.active { background: var(--cyan); color: #000; border-color: var(--cyan); }
+  button:disabled { opacity: .5; cursor: default; }
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 12px; font-variant-numeric: tabular-nums; }
+  .kv div:nth-child(odd) { color: var(--muted); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); font-size: 13px; }
+  th { color: var(--muted); font-weight: 600; }
+  .pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 12px; border: 1px solid var(--line); }
+  .pass { color: var(--green); border-color: var(--green); }
+  .fail { color: var(--red); border-color: var(--red); }
+  .alert { padding: 6px 8px; border-radius: 6px; margin: 4px 0; border-left: 4px solid; background: rgba(127,127,127,.08); }
+  .alert.info { border-color: var(--blue); } .alert.warning { border-color: var(--amber); } .alert.danger { border-color: var(--red); }
+  .done { color: var(--green); } .active { color: var(--cyan); font-weight: 600; } .pending { color: var(--muted); }
+  #hover { font-family: ui-monospace, Consolas, monospace; font-size: 12px; color: var(--muted); min-height: 1.4em; }
+  pre { background: rgba(127,127,127,.08); padding: 8px; border-radius: 6px; max-height: 320px; overflow: auto; font-size: 11px; }
+  .legend span { display: inline-block; margin-right: 12px; font-size: 12px; color: var(--muted); }
+  .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+  .hint { color: var(--muted); font-size: 12px; }
+  .bignum { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Marps · navigation harness</h1>
+  <span id="api">connecting…</span>
+  <span class="hint">Deuteronilus Mensae · 2 km × 2 km · North up · x east, z north (local meters)</span>
+</header>
+
+<main>
+  <section>
+    <div class="card">
+      <h2>Map</h2>
+      <canvas id="map" width="780" height="780"></canvas>
+      <div id="hover">Hover over the map to see coordinates, slope and hazard.</div>
+      <div class="legend" style="margin-top:6px">
+        <span><i class="sw" style="background:#3fb950"></i>&lt;15°</span>
+        <span><i class="sw" style="background:#d29922"></i>15–22°</span>
+        <span><i class="sw" style="background:#f85149"></i>&gt;22° (blocked)</span>
+        <span><i class="sw" style="background:#a371f7"></i>rough zone</span>
+        <span><i class="sw" style="background:#39d0d8"></i>planned route</span>
+        <span><i class="sw" style="background:#ff8c42"></i>HUD route</span>
+        <span><i class="sw" style="background:#58a6ff"></i>astronaut</span>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <label>Click on map:</label>
+        <button class="mode active" data-mode="none">View only</button>
+        <button class="mode" data-mode="from">Set origin</button>
+        <button class="mode" data-mode="to">Set destination</button>
+        <button class="mode" data-mode="astro">Move astronaut</button>
+      </div>
+      <div class="row">
+        <label>Origin (x, z)</label><input id="fromX" type="number" step="0.1"><input id="fromZ" type="number" step="0.1">
+      </div>
+      <div class="row">
+        <label>Destination (x, z)</label><input id="toX" type="number" step="0.1"><input id="toZ" type="number" step="0.1">
+      </div>
+      <div class="row">
+        <label>Mission leg</label>
+        <select id="legSelect"></select>
+        <button id="btnLeg">Load leg</button>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnRoute">Compute route origin → destination</button>
+        <button id="btnMission">Full mission (B→P1→P2→P3→P4→B)</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Route</h2>
+      <div id="routeStats" class="kv"><div>status</div><div>not computed</div></div>
+    </div>
+
+    <div class="card">
+      <h2>Mission vs reference</h2>
+      <div id="missionTable"><span class="hint">Press “Full mission” to compare each leg with the reference planner.</span></div>
+    </div>
+  </section>
+
+  <section>
+    <div class="card">
+      <h2>Helmet (test sensor)</h2>
+      <div class="row">
+        <label>Astronaut (x, z)</label><input id="astX" type="number" step="0.1"><input id="astZ" type="number" step="0.1">
+      </div>
+      <div class="row">
+        <label>Heading (°)</label>
+        <input id="heading" type="range" min="0" max="359" value="0" style="flex:1">
+        <span id="headingVal" style="min-width:36px;text-align:right">0</span>
+      </div>
+      <div class="row">
+        <label>Active target</label>
+        <select id="activeWp"><option value="">automatic (next)</option></select>
+      </div>
+      <div class="row">
+        <button class="primary" id="btnHud">Send and read HUD</button>
+        <label style="min-width:auto"><input type="checkbox" id="autoHud"> auto (1 Hz)</label>
+        <span id="latency" class="hint"></span>
+      </div>
+      <div class="row">
+        <button id="btnNearWp">Place astronaut at next target</button>
+        <button id="btnMoveWp">Simulate 25 m advance</button>
+      </div>
+      <div class="row">
+        <label><input type="checkbox" id="kbOn" checked> Keyboard enabled</label>
+        <label style="min-width:auto">speed (m/s)</label>
+        <input id="speed" type="number" min="0.5" max="50" step="0.5" value="10" style="width:70px">
+      </div>
+      <div class="hint">
+        <b>Arrows</b>: move the astronaut (↑ north, ↓ south, → east, ← west) ·
+        <b>W A S D</b>: look north / west / south / east ·
+        <b>Q E</b>: turn 15° left / right.
+        Each change triggers a HUD update: if the astronaut moves more than 15 m away from the route, the engine recalculates it.
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>HUD</h2>
+      <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px">
+        <div>
+          <div class="hint">Next target</div>
+          <div id="nextName" class="bignum">—</div>
+        </div>
+        <div style="text-align:right; white-space:nowrap">
+          <div class="hint">distance</div>
+          <div id="nextDist" class="bignum">—</div>
+        </div>
+      </div>
+      <div class="kv" id="nextKv"></div>
+      <div class="kv" id="routeKv" style="margin-top:8px"></div>
+      <div id="replanLog" class="hint" style="margin-top:6px">recalculations in this session: 0</div>
+      <h2 style="margin-top:12px">Alerts</h2>
+      <div id="alerts"><span class="hint">no alerts</span></div>
+      <h2 style="margin-top:12px">Objectives</h2>
+      <div id="objectives"></div>
+      <h2 style="margin-top:12px">Nearby hazards</h2>
+      <div id="hazards"><span class="hint">none in range</span></div>
+      <h2 style="margin-top:12px">Layers</h2>
+      <div id="layers" class="kv"></div>
+    </div>
+
+    <div class="card">
+      <h2>Raw response</h2>
+      <button id="btnRaw">Show / hide JSON</button>
+      <pre id="raw" style="display:none"></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const fmt = (v, d = 1) => (v === null || v === undefined || Number.isNaN(v)) ? '—' : Number(v).toFixed(d);
+
+  const canvas = $('map');
+  const ctx = canvas.getContext('2d');
+  let M = null;               // map + mission
+  let terrainImg = null;      // hazard/slope image
+  let hazard = null, slope = null;
+  let plannedRoute = null;    // [{x,z}] of the last planned route
+  let hudRoute = null;        // [{x,z}] remaining leg according to the HUD
+  let astro = { x: 300, z: 1700 };
+  let hudPayload = null;
+  let mode = 'none';
+  let autoTimer = null;
+
+  // ---- coordinate utilities ----
+  const toPx = (x, z) => [x / M.side * canvas.width, (1 - z / M.side) * canvas.height];
+  const toLocal = (px, py) => [px / canvas.width * M.side, (1 - py / canvas.height) * M.side];
+  const nodeIndex = (x, z) => {
+    const c = Math.min(M.width - 1, Math.max(0, Math.round(x / M.cell)));
+    const r = Math.min(M.height - 1, Math.max(0, Math.round((M.height - 1) - z / M.cell)));
+    return { c, r, i: r * M.width + c };
+  };
+
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    if (!r.ok) throw new Error(path + ' → HTTP ' + r.status);
+    return r.json();
+  }
+  const post = (path, body) => api(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+
+  function b64ToBytes(b64) {
+    const bin = atob(b64);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    return out;
+  }
+
+  // ---- startup ----
+  async function init() {
+    try {
+      const h = await api('/api/health');
+      $('api').textContent = `API ok · grid ${h.map}×${h.map} · cell ${h.cell.toFixed(3)} m`;
+    } catch (e) { $('api').textContent = 'API not responding: ' + e.message; return; }
+
+    M = await api('/api/mission');
+    hazard = b64ToBytes(M.hazardB64);
+    slope = b64ToBytes(M.slopeB64);
+    buildTerrainImage();
+    fillLegSelect();
+    fillWaypointSelect();
+    $('fromX').value = 300; $('fromZ').value = 1700;
+    $('toX').value = 750;   $('toZ').value = 1700;
+    setAstro(300, 1700);
+    draw();
+    await hud();
+  }
+
+  function buildTerrainImage() {
+    const off = document.createElement('canvas');
+    off.width = M.width; off.height = M.height;
+    const octx = off.getContext('2d');
+    const img = octx.createImageData(M.width, M.height);
+    for (let i = 0; i < hazard.length; i++) {
+      let r, g, b;
+      const h = hazard[i], s = slope[i];
+      if (h === 2) { r = 248; g = 81; b = 73; }
+      else if (h === 3) { r = 163; g = 113; b = 247; }
+      else if (h === 1) { r = 210; g = 153; b = 34; }
+      else {
+        // walkable: dark green, brightness according to slope
+        const k = Math.min(1, s / 15);
+        r = 20 + 30 * k; g = 70 + 60 * (1 - k); b = 40 + 20 * k;
+      }
+      img.data[i * 4] = r; img.data[i * 4 + 1] = g; img.data[i * 4 + 2] = b; img.data[i * 4 + 3] = 255;
+    }
+    octx.putImageData(img, 0, 0);
+    terrainImg = off;
+  }
+
+  function fillLegSelect() {
+    const sel = $('legSelect');
+    const order = M.objectiveOrder;
+    for (let i = 0; i < order.length - 1; i++) {
+      const o = document.createElement('option');
+      o.value = i; o.textContent = `${order[i]} → ${order[i + 1]}`;
+      sel.appendChild(o);
+    }
+  }
+  function fillWaypointSelect() {
+    const sel = $('activeWp');
+    for (const id of [...new Set(M.objectiveOrder)]) {
+      const o = document.createElement('option'); o.value = id; o.textContent = id; sel.appendChild(o);
+    }
+  }
+
+  // ---- drawing ----
+  function draw() {
+    if (!M) return;
+    const W = canvas.width, H = canvas.height;
+    ctx.imageSmoothingEnabled = false;
+    ctx.clearRect(0, 0, W, H);
+    ctx.drawImage(terrainImg, 0, 0, W, H);
+
+    // hazard zones
+    ctx.lineWidth = 1; ctx.strokeStyle = 'rgba(248,81,73,.9)';
+    for (const z of M.zones) {
+      const [x1, y1] = toPx(z.boxMinX, z.boxMaxZ ?? z.boxMinZ);
+      const [x2, y2] = toPx(z.boxMaxX, z.boxMinZ);
+      ctx.strokeRect(Math.min(x1, x2), Math.min(y1, y2), Math.abs(x2 - x1), Math.abs(y2 - y1));
+    }
+
+    // planned route
+    drawPolyline(plannedRoute, '#39d0d8', 2.5);
+    // HUD route
+    drawPolyline(hudRoute, '#ff8c42', 3);
+
+    // antennas and points
+    for (const w of M.waypoints) {
+      const [px, py] = toPx(w.x, w.z);
+      if (w.type === 'antenna') {
+        ctx.fillStyle = '#e6edf3';
+        ctx.beginPath(); ctx.moveTo(px, py - 7); ctx.lineTo(px - 6, py + 5); ctx.lineTo(px + 6, py + 5); ctx.closePath(); ctx.fill();
+      } else {
+        const obj = w.isObjective;
+        ctx.fillStyle = obj ? '#ffd33d' : '#8b949e';
+        ctx.beginPath(); ctx.arc(px, py, obj ? 6 : 4, 0, Math.PI * 2); ctx.fill();
+        ctx.lineWidth = 2; ctx.strokeStyle = '#000'; ctx.stroke();
+      }
+      ctx.fillStyle = '#fff'; ctx.font = '12px system-ui'; ctx.fillText(w.id, px + 8, py - 6);
+    }
+
+    // astronaut and heading
+    const [ax, ay] = toPx(astro.x, astro.z);
+    const h = parseFloat($('heading').value) * Math.PI / 180;
+    const len = 40;
+    ctx.strokeStyle = '#58a6ff'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(ax, ay);
+    ctx.lineTo(ax + Math.sin(h) * len / M.side * W, ay - Math.cos(h) * len / M.side * H); ctx.stroke();
+    ctx.fillStyle = '#58a6ff'; ctx.beginPath(); ctx.arc(ax, ay, 7, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#fff'; ctx.lineWidth = 2; ctx.stroke();
+
+    // manual origin/destination
+    const fx = parseFloat($('fromX').value), fz = parseFloat($('fromZ').value);
+    const tx = parseFloat($('toX').value), tz = parseFloat($('toZ').value);
+    if (!Number.isNaN(fx) && !Number.isNaN(fz)) marker(fx, fz, '#3fb950', 'O');
+    if (!Number.isNaN(tx) && !Number.isNaN(tz)) marker(tx, tz, '#f85149', 'D');
+  }
+
+  function drawPolyline(pts, color, width) {
+    if (!pts || pts.length < 2) return;
+    ctx.strokeStyle = color; ctx.lineWidth = width; ctx.lineJoin = 'round';
+    ctx.beginPath();
+    pts.forEach((p, i) => { const [x, y] = toPx(p.x, p.z); i ? ctx.lineTo(x, y) : ctx.moveTo(x, y); });
+    ctx.stroke();
+  }
+  function marker(x, z, color, label) {
+    const [px, py] = toPx(x, z);
+    ctx.fillStyle = color; ctx.beginPath(); ctx.arc(px, py, 5, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#fff'; ctx.font = 'bold 12px system-ui'; ctx.fillText(label, px + 7, py + 4);
+  }
+
+  // ---- map interaction ----
+  function setAstro(x, z) {
+    astro = { x, z };
+    $('astX').value = x.toFixed(1); $('astZ').value = z.toFixed(1);
+  }
+
+  canvas.addEventListener('mousemove', (ev) => {
+    if (!M) return;
+    const rect = canvas.getBoundingClientRect();
+    const px = (ev.clientX - rect.left) * canvas.width / rect.width;
+    const py = (ev.clientY - rect.top) * canvas.height / rect.height;
+    const [x, z] = toLocal(px, py);
+    if (x < 0 || z < 0 || x > M.side || z > M.side) { $('hover').textContent = ''; return; }
+    const n = nodeIndex(x, z);
+    const pelig = ['walkable', '15–22°', '>22° (blocked)', 'rough zone'][hazard[n.i]];
+    $('hover').textContent =
+      `x ${x.toFixed(1)} · z ${z.toFixed(1)} · ` +
+      `X ${(x + M.originX).toFixed(1)} · Y ${(z + M.originY).toFixed(1)} · ` +
+      `slope ${slope[n.i]}° · ${pelig}`;
+  });
+
+  canvas.addEventListener('click', (ev) => {
+    if (!M) return;
+    const rect = canvas.getBoundingClientRect();
+    const [x, z] = toLocal((ev.clientX - rect.left) * canvas.width / rect.width,
+                           (ev.clientY - rect.top) * canvas.height / rect.height);
+    const lx = Math.round(x * 10) / 10, lz = Math.round(z * 10) / 10;
+    if (mode === 'from') { $('fromX').value = lx; $('fromZ').value = lz; }
+    else if (mode === 'to') { $('toX').value = lx; $('toZ').value = lz; }
+    else if (mode === 'astro') { setAstro(lx, lz); }
+    draw();
+  });
+
+  document.querySelectorAll('button.mode').forEach((b) => b.addEventListener('click', () => {
+    mode = b.dataset.mode;
+    document.querySelectorAll('button.mode').forEach((x) => x.classList.toggle('active', x === b));
+  }));
+
+  $('heading').addEventListener('input', () => { $('headingVal').textContent = $('heading').value; draw(); });
+  ['fromX', 'fromZ', 'toX', 'toZ'].forEach((id) => $(id).addEventListener('change', draw));
+
+  // ---- routes ----
+  async function calcRoute() {
+    const q = {
+      fromX: parseFloat($('fromX').value), fromZ: parseFloat($('fromZ').value),
+      toX: parseFloat($('toX').value), toZ: parseFloat($('toZ').value),
+    };
+    const r = await post('/api/route', q);
+    plannedRoute = r.points;
+    $('routeStats').innerHTML = routeHtml(r, `${fmt(q.fromX)},${fmt(q.fromZ)} → ${fmt(q.toX)},${fmt(q.toZ)}`);
+    draw();
+    return r;
+  }
+
+  function routeHtml(r, label) {
+    const ok = r.found ? '<span class="pill pass">found</span>' : '<span class="pill fail">no route</span>';
+    return `
+      <div>leg</div><div>${label}</div>
+      <div>status</div><div>${ok}</div>
+      <div>horizontal length</div><div>${fmt(r.lengthM, 1)} m</div>
+      <div>estimated time</div><div>${fmt(r.minutes, 1)} min</div>
+      <div>ascent / descent</div><div>${fmt(r.ascentM, 1)} / ${fmt(r.descentM, 1)} m</div>
+      <div>max slope</div><div>${fmt(r.maxSlopeDeg, 1)}°</div>
+      <div>nodes / expansions</div><div>${r.nodes} / ${r.expansions}</div>
+      <div>A* compute</div><div>${fmt(r.computeMs, 1)} ms (total ${fmt(r.totalMs, 1)} ms)</div>`;
+  }
+
+  $('btnRoute').addEventListener('click', async () => {
+    $('btnRoute').disabled = true;
+    try { await calcRoute(); } catch (e) { alert(e.message); } finally { $('btnRoute').disabled = false; }
+  });
+
+  $('btnLeg').addEventListener('click', () => {
+    const i = parseInt($('legSelect').value, 10);
+    const order = M.objectiveOrder;
+    const a = M.waypoints.find((w) => w.id === order[i]);
+    const b = M.waypoints.find((w) => w.id === order[i + 1]);
+    $('fromX').value = a.x; $('fromZ').value = a.z; $('toX').value = b.x; $('toZ').value = b.z;
+    draw();
+  });
+
+  $('btnMission').addEventListener('click', async () => {
+    $('btnMission').disabled = true;
+    try {
+      const order = M.objectiveOrder;
+      const rows = [];
+      let totalLen = 0, totalMin = 0, totalMs = 0;
+      for (let i = 0; i < order.length - 1; i++) {
+        const a = M.waypoints.find((w) => w.id === order[i]);
+        const b = M.waypoints.find((w) => w.id === order[i + 1]);
+        const r = await post('/api/route', { fromX: a.x, fromZ: a.z, toX: b.x, toZ: b.z });
+        const ref = M.referenceLegs.find((l) => l.leg.replace(/\s/g, '') === `${order[i]}→${order[i + 1]}`);
+        totalLen += r.lengthM; totalMin += r.minutes; totalMs += r.totalMs;
+        rows.push({ name: `${order[i]}→${order[i + 1]}`, r, ref });
+      }
+      const body = rows.map((x) => {
+        const dL = x.ref ? (x.r.lengthM - x.ref.lengthM) / x.ref.lengthM : null;
+        const dT = x.ref ? (x.r.minutes - x.ref.minutes) / x.ref.minutes : null;
+        const pass = x.r.found && x.r.maxSlopeDeg <= 22.0001 && dL !== null && Math.abs(dL) <= 0.10 && dT <= 0.02;
+        return `<tr>
+          <td>${x.name}</td>
+          <td>${fmt(x.r.lengthM, 0)} m</td>
+          <td>${x.ref ? x.ref.lengthM : '—'} m ${x.ref ? `<span class="hint">(${dL >= 0 ? '+' : ''}${fmt(dL * 100, 1)}%)</span>` : ''}</td>
+          <td>${fmt(x.r.minutes, 1)}</td>
+          <td>${x.ref ? x.ref.minutes : '—'} ${x.ref ? `<span class="hint">(${dT >= 0 ? '+' : ''}${fmt(dT * 100, 1)}%)</span>` : ''}</td>
+          <td>${fmt(x.r.maxSlopeDeg, 1)}°</td>
+          <td><span class="pill ${pass ? 'pass' : 'fail'}">${pass ? 'ok' : 'review'}</span></td>
+        </tr>`;
+      }).join('');
+      $('missionTable').innerHTML = `
+        <table>
+          <thead><tr><th>leg</th><th>our length</th><th>ref. length</th><th>our min</th><th>ref. min</th><th>max slope</th><th></th></tr></thead>
+          <tbody>${body}</tbody>
+          <tfoot><tr><th>total</th><th>${fmt(totalLen, 0)} m</th><th colspan="2"></th><th>${fmt(totalMin, 1)} min</th><th colspan="2"><span class="hint">compute ${fmt(totalMs, 0)} ms</span></th></tr></tfoot>
+        </table>
+        <p class="hint">Criteria: length ±10 %, time no more than 2 % above the reference, slope ≤ 22°.</p>`;
+      // show the last computed leg
+      plannedRoute = rows.length ? rows[rows.length - 1].r.points : null;
+      $('routeStats').innerHTML = routeHtml(rows[rows.length - 1].r, 'mission: ' + rows[rows.length - 1].name);
+      draw();
+    } catch (e) { alert(e.message); } finally { $('btnMission').disabled = false; }
+  });
+
+  // ---- helmet / HUD ----
+  async function hud() {
+    if (!M) return;
+    const body = {
+      sessionId: 'web',
+      x: parseFloat($('astX').value), z: parseFloat($('astZ').value),
+      headingDeg: parseFloat($('heading').value), pitchDeg: 0,
+      missionTimeS: (Date.now() / 1000) % 100000,
+      activeWaypointId: $('activeWp').value || null,
+    };
+    await post('/api/sensor', body);
+    const r = await api('/api/hud');
+    hudPayload = r.hud;
+    setAstro(body.x, body.z);
+    renderHud(r.hud, r.serverMs);
+    draw();
+  }
+
+  function renderHud(h, serverMs) {
+    $('latency').textContent = `server ${fmt(serverMs, 2)} ms · engine ${fmt(h.computeMs, 2)} ms`;
+    const nw = h.nextWaypoint;
+    $('nextName').textContent = nw ? `${nw.id} · ${nw.name}` : (h.missionComplete ? 'Mission complete' : '—');
+    $('nextDist').textContent = nw ? `${fmt(nw.distanceM, 0)} m` : '—';
+    $('nextKv').innerHTML = nw ? `
+      <div>absolute bearing</div><div>${fmt(nw.bearingDeg, 1)}°</div>
+      <div>relative bearing</div><div>${fmt(nw.relativeBearingDeg, 1)}° ${arrow(nw.relativeBearingDeg)}</div>` : '';
+
+    const rt = h.route;
+    hudRoute = rt && rt.points && rt.points.length ? rt.points : null;
+    if (rt && rt.replanned) {
+      replanCount++;
+      $('replanLog').innerHTML = `recalculations in this session: <b>${replanCount}</b> · last: ${fmt(rt.lengthM, 0)} m, ` +
+        `${fmt(rt.estimatedMinutes, 1)} min, ${rt.found ? 'route OK' : 'NO ROUTE'} · engine ${fmt(h.computeMs, 1)} ms`;
+    }
+    $('routeKv').innerHTML = rt ? `
+      <div>route</div><div>${rt.found ? 'OK' : 'no route'} ${rt.replanned ? '<span class="pill">recalculated</span>' : ''}</div>
+      <div>remaining</div><div>${fmt(rt.remainingM, 1)} m</div>
+      <div>estimated time (full route)</div><div>${fmt(rt.estimatedMinutes, 1)} min</div>
+      <div>route max slope</div><div>${fmt(rt.maxSlopeDeg, 1)}°</div>` : '';
+
+    $('alerts').innerHTML = h.alerts.length
+      ? h.alerts.map((a) => `<div class="alert ${a.severity}"><b>${a.code}</b> · ${a.message}</div>`).join('')
+      : '<span class="hint">no alerts</span>';
+
+    $('objectives').innerHTML = h.objectives.map((o) =>
+      `<div class="${o.status}">${o.status === 'done' ? '✔' : (o.status === 'active' ? '➤' : '•')} ${o.id} · ${o.name}</div>`).join('');
+
+    $('hazards').innerHTML = h.hazards.length
+      ? h.hazards.map((z) => `<div>${z.type} · ${z.severity} · ${fmt(z.distanceM, 0)} m · max ${fmt(z.maxSlopeDeg, 1)}°</div>`).join('')
+      : '<span class="hint">none in range</span>';
+
+    const L = h.layers;
+    $('layers').innerHTML = `
+      <div>slope underfoot</div><div>${fmt(L.slopeDeg, 1)}°</div>
+      <div>hazard class</div><div>${L.hazardClass}</div>
+      <div>elevation</div><div>${fmt(L.elevationM, 1)} m</div>
+      <div>masts in view</div><div>${L.visibleAntennas} (${L.antennas.map((a) => a.id + (a.visible ? '✔' : '✖')).join(' ')})</div>`;
+
+    $('raw').textContent = JSON.stringify(h, null, 2);
+  }
+
+  function arrow(rel) {
+    const a = Math.abs(rel);
+    if (a < 10) return '↑ ahead';
+    if (a > 170) return '↓ behind';
+    return rel < 0 ? '← left' : '→ right';
+  }
+
+  $('btnHud').addEventListener('click', async () => {
+    $('btnHud').disabled = true;
+    try { await hud(); } catch (e) { alert(e.message); } finally { $('btnHud').disabled = false; }
+  });
+
+  $('autoHud').addEventListener('change', (ev) => {
+    if (ev.target.checked) { autoTimer = setInterval(() => hud().catch(() => {}), 1000); }
+    else { clearInterval(autoTimer); autoTimer = null; }
+  });
+
+  $('btnNearWp').addEventListener('click', () => {
+    const target = hudPayload && hudPayload.nextWaypoint;
+    if (!target) return;
+    setAstro(target.x - 3, target.z - 3);
+    draw();
+  });
+
+  $('btnMoveWp').addEventListener('click', () => {
+    // advances 25 m toward the next target (straight line, ignoring terrain: only to test the HUD)
+    const t = hudPayload && hudPayload.nextWaypoint;
+    if (!t) return;
+    const dx = t.x - astro.x, dz = t.z - astro.z, d = Math.hypot(dx, dz) || 1;
+    const step = Math.min(25, d);
+    setAstro(astro.x + dx / d * step, astro.z + dz / d * step);
+    $('heading').value = Math.round((Math.atan2(dx, dz) * 180 / Math.PI + 360) % 360);
+    $('headingVal').textContent = $('heading').value;
+    hud().catch((e) => alert(e.message));
+  });
+
+  $('btnRaw').addEventListener('click', () => {
+    const pre = $('raw');
+    pre.style.display = pre.style.display === 'none' ? 'block' : 'none';
+  });
+
+  ['astX', 'astZ'].forEach((id) => $(id).addEventListener('change', () => {
+    setAstro(parseFloat($('astX').value), parseFloat($('astZ').value));
+    draw();
+  }));
+
+  // ---- keyboard: arrows move, WASD/QE look ----
+  let replanCount = 0;
+  const ARROWS = ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+  const held = new Set();
+  let schedTimer = null, inFlight = false, sendPending = false, lastSend = 0;
+
+  function setHeading(deg) {
+    const d = ((Math.round(deg) % 360) + 360) % 360;
+    $('heading').value = d;
+    $('headingVal').textContent = d;
+    draw();
+  }
+
+  // Batches changes: at most one HUD request every 100 ms, with no overlapping requests.
+  function scheduleSend() {
+    if (!$('kbOn').checked) return;
+    if (inFlight) { sendPending = true; return; }
+    clearTimeout(schedTimer);
+    schedTimer = setTimeout(sendNow, Math.max(0, 100 - (Date.now() - lastSend)));
+  }
+  async function sendNow() {
+    inFlight = true; lastSend = Date.now();
+    try { await hud(); } catch (e) { $('api').textContent = 'HUD error: ' + e.message; }
+    inFlight = false;
+    if (sendPending) { sendPending = false; scheduleSend(); }
+  }
+
+  window.addEventListener('keydown', (ev) => {
+    const t = ev.target.tagName;
+    if (t === 'TEXTAREA' || t === 'SELECT' || (t === 'INPUT' && ev.target.type !== 'range' && ev.target.type !== 'checkbox')) return;
+    if (!M) return;
+    if (ARROWS.includes(ev.key)) { ev.preventDefault(); held.add(ev.key); return; }
+    const k = ev.key.toLowerCase();
+    const cardinal = { w: 0, d: 90, s: 180, a: 270 };
+    if (k in cardinal) { ev.preventDefault(); setHeading(cardinal[k]); scheduleSend(); }
+    else if (k === 'q' || k === 'e') { ev.preventDefault(); setHeading(parseFloat($('heading').value) + (k === 'e' ? 15 : -15)); scheduleSend(); }
+  });
+  window.addEventListener('keyup', (ev) => held.delete(ev.key));
+  window.addEventListener('blur', () => held.clear());
+
+  // Continuous movement at ~30 Hz while arrow keys are held.
+  let lastTick = performance.now();
+  setInterval(() => {
+    const now = performance.now();
+    const dt = Math.min(0.25, (now - lastTick) / 1000);
+    lastTick = now;
+    if (!M || held.size === 0 || !$('kbOn').checked) return;
+    let dx = 0, dz = 0;
+    if (held.has('ArrowUp')) dz += 1;
+    if (held.has('ArrowDown')) dz -= 1;
+    if (held.has('ArrowRight')) dx += 1;
+    if (held.has('ArrowLeft')) dx -= 1;
+    if (dx === 0 && dz === 0) return;
+    const n = Math.hypot(dx, dz);
+    const speed = Math.max(0.5, parseFloat($('speed').value) || 10);
+    const step = speed * dt;
+    const nx = Math.min(M.side, Math.max(0, astro.x + dx / n * step));
+    const nz = Math.min(M.side, Math.max(0, astro.z + dz / n * step));
+    setAstro(Math.round(nx * 10) / 10, Math.round(nz * 10) / 10);
+    draw();
+    scheduleSend();
+  }, 33);
+
+  window.addEventListener('resize', () => draw());
+  init().catch((e) => { $('api').textContent = 'error: ' + e.message; });
+})();
+</script>
+</body>
+</html>
