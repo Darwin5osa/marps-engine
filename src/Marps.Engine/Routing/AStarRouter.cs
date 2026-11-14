@@ -22,6 +22,7 @@ namespace Marps.Engine.Routing
         private readonly WalkingModel _model;
         private readonly RouteOptions _options;
         private readonly double _maxTan;
+        private readonly double _heuristicWeight;
         private readonly float[] _g;
         private readonly int[] _parent;
         private readonly int[] _openStamp;
@@ -35,6 +36,7 @@ namespace Marps.Engine.Routing
             _model = model ?? WalkingModel.Fitted;
             _options = options ?? new RouteOptions();
             _maxTan = Math.Tan(_options.MaxSlopeDeg * Math.PI / 180.0);
+            _heuristicWeight = _options.HeuristicWeight;
 
             int n = map.Width * map.Height;
             _g = new float[n];
@@ -176,7 +178,7 @@ namespace Marps.Engine.Routing
         {
             int dc = node % w - goal % w;
             int dr = node / w - goal / w;
-            return _model.LowerBoundMinutes(Math.Sqrt((double)dc * dc + (double)dr * dr) * cell);
+            return _heuristicWeight * _model.LowerBoundMinutes(Math.Sqrt((double)dc * dc + (double)dr * dr) * cell);
         }
     }
 }
