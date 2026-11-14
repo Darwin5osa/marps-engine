@@ -31,5 +31,11 @@ namespace Marps.Engine.Navigation
 
         /// <summary>Simplification tolerance for the polyline sent to the HUD.</summary>
         public double PolylineToleranceM { get; set; } = 0.5;
+
+        /// <summary>
+        /// Maximum number of astronaut sessions kept in memory. When a new session would exceed this,
+        /// the least recently used session is discarded (its progress and cached route are lost).
+        /// </summary>
+        public int MaxSessions { get; set; } = 4096;
     }
 }

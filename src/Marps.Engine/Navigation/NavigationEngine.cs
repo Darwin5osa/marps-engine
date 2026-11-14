@@ -22,6 +22,7 @@ namespace Marps.Engine.Navigation
         private readonly AStarRouter _router;
         private readonly Dictionary<string, SessionState> _sessions = new Dictionary<string, SessionState>();
         private readonly object _lock = new object();
+        private long _useCounter;
 
         public NavigationEngine(TerrainMap map, MissionDefinition mission,
             NavigationOptions options = null, WalkingModel model = null, RouteOptions routeOptions = null)
@@ -52,9 +53,11 @@ namespace Marps.Engine.Navigation
                 string sid = string.IsNullOrEmpty(req.SessionId) ? "default" : req.SessionId;
                 if (!_sessions.TryGetValue(sid, out var session))
                 {
+                    if (_sessions.Count >= Math.Max(1, _options.MaxSessions)) EvictLeastRecentlyUsed();
                     session = new SessionState();
                     _sessions[sid] = session;
                 }
+                session.LastUsed = ++_useCounter;
 
                 var pos = new Point2(req.X, req.Z);
                 var response = new NavigationResponse
@@ -310,8 +313,27 @@ namespace Marps.Engine.Navigation
             return alerts;
         }
 
+        /// <summary>Drops the session that was used longest ago. Called with the lock held.</summary>
+        private void EvictLeastRecentlyUsed()
+        {
+            string oldestId = null;
+            long oldest = long.MaxValue;
+            foreach (var pair in _sessions)
+            {
+                if (pair.Value.LastUsed < oldest)
+                {
+                    oldest = pair.Value.LastUsed;
+                    oldestId = pair.Key;
+                }
+            }
+            if (oldestId != null) _sessions.Remove(oldestId);
+        }
+
         private sealed class SessionState
         {
+            /// <summary>Value of the engine's use counter when this session was last used.</summary>
+            public long LastUsed { get; set; }
+
             /// <summary>Index of the current step. Previous steps are completed.</summary>
             public int Step { get; set; }
             public Point2 LastPos { get; set; }

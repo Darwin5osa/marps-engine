@@ -30,6 +30,26 @@ namespace Marps.Engine.Tests
             Assert.True(sw.ElapsedMilliseconds < 1000, $"took {sw.ElapsedMilliseconds} ms");
         }
 
+        [Fact]
+        public void Sessions_BeyondLimit_EvictLeastRecentlyUsed()
+        {
+            TerrainMap map = TestTerrain.Build(41, 2.0, (x, z) => 0.0);
+            var engine = new NavigationEngine(map, OneTarget(), new NavigationOptions { MaxSessions = 3 });
+
+            // "a" reaches the only target, so the mission is complete for that session.
+            var done = engine.Update(new NavigationRequest { SessionId = "a", X = 60, Z = 60 });
+            Assert.True(done.MissionComplete);
+
+            // Three newer sessions push "a" out of the cache.
+            engine.Update(new NavigationRequest { SessionId = "b", X = 10, Z = 10 });
+            engine.Update(new NavigationRequest { SessionId = "c", X = 10, Z = 10 });
+            engine.Update(new NavigationRequest { SessionId = "d", X = 10, Z = 10 });
+
+            // "a" starts over, so its progress is gone.
+            var restarted = engine.Update(new NavigationRequest { SessionId = "a", X = 10, Z = 10 });
+            Assert.False(restarted.MissionComplete);
+        }
+
         [Theory]
         [InlineData(double.PositiveInfinity)]
         [InlineData(-1e12)]
