@@ -37,5 +37,13 @@ namespace Marps.Engine.Navigation
         /// the least recently used session is discarded (its progress and cached route are lost).
         /// </summary>
         public int MaxSessions { get; set; } = 4096;
+
+        /// <summary>
+        /// When true, route searches run on a background thread. A call that needs a new route returns
+        /// immediately with the previous route (or none) and <c>route.pending = true</c>; the new route is
+        /// applied on a later call. Keeps long searches off the caller's frame. Default false: each call
+        /// returns the up-to-date route.
+        /// </summary>
+        public bool BackgroundReplanning { get; set; } = false;
     }
 }
