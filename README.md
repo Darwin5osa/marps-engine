@@ -58,15 +58,17 @@ At `http://localhost:5080`:
 - **Cost = time in suit**, not distance. Model `t = 0.013937·d + 0.090788·ascent + 0.042108·descent` (min), fitted to the 5 legs in `reference_routes.json` (max error 0.11 min).
 - **Hard slope limit**: measured between the two nodes of each step (1.95 m), not with 0.5 m sampling. This way the 23.7° point flagged in the reference data is not stepped on.
 - **1025-node grid**, 1.953125 m cell (same as Unity). 8-neighbor A* with a binary heap and reused arrays.
-- **Sessions**: the engine remembers completed steps and the cached route per astronaut. It recalculates only if the target changes, if requested, or if the astronaut moves more than 15 m away from the route.
+- **Weighted A\***: the heuristic is multiplied by 1.25 (`RouteOptions.HeuristicWeight`). This cuts search time by about 40 % for under 1 % more walking time than the optimum.
+- **Sessions**: the engine remembers completed steps and the cached route per astronaut. It recalculates only if the target changes, if requested, or if the astronaut moves more than 15 m away from the route. At most `MaxSessions` (default 4096) are kept; the least recently used one is dropped.
 - **Mission steps** in order. The pending step is completed if the travelled path since the last sample passes within 10 m of its point; later steps are completed only by proximity to the current position (so returning through the base does not credit it again).
 
 ## Validation
 
 - Terrain: 1025×1025 heights between −3623.578 and −3481.388 m; hazard 2.3 % (>22°), 9.0 % (15–22°), 13.8 % (rough).
-- Reference legs: with the same model and terrain, the reference route costs 9.18 / 18.00 / 18.40 / 15.38 / 26.30 min (published: 9.1 / 17.9 / 18.3 / 15.2 / 26.3). Our routes cost 2–3 % less on each leg; distance is 2–6 % higher because we optimize time.
-- Full mission: 4769 m, 85.3 min (reference: 4600 m, 87 min).
-- Compute time (Debug, .NET 9): first route per leg 30–200 ms; HUD updates with cached route: median 0.5 ms, p95 1 ms.
+- Reference legs: with the same model and terrain, the reference route costs 9.18 / 18.00 / 18.40 / 15.38 / 26.30 min (published: 9.1 / 17.9 / 18.3 / 15.2 / 26.3). With weight 1.25 our routes cost per leg: 9.03 / 17.41 / 17.95 / 15.31 / 26.34 min, between 3.3 % less and 0.2 % more than the reference (the last leg is 0.2 % more). Distance is 2–6 % higher per leg because we optimize time.
+- Full mission: 4757 m, 86.0 min (reference: 4600 m, 87 min).
+- Compute time (Release, .NET 9, one desktop PC): each leg 8–26 ms; HUD updates with cached route: median 0.04 ms, p99 0.2 ms; forced replan: 8 ms.
+- Memory: about 9 MB for the terrain and 12 MB for the router on the real grid. Details and worst cases are in `context/benchmark_results.md` (not versioned).
 
 ## Assumptions to validate
 
