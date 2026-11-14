@@ -13,7 +13,12 @@ namespace Marps.Engine.Navigation
             double h1 = map.ElevationAt(from) + fromHeightAboveGroundM;
             double h2 = map.ElevationAt(to) + toHeightAboveGroundM;
             double length = from.DistanceTo(to);
-            int steps = Math.Max(2, (int)Math.Ceiling(length / map.Cell));
+            // Clamp in floating point before the cast: casting a huge or infinite value to int saturates
+            // to int.MaxValue and would make this loop run about two billion times.
+            // Two samples per cell along the map diagonal is more than enough to see any terrain crest.
+            double maxSteps = 2.0 * (map.Width + map.Height);
+            double wanted = Math.Max(2.0, Math.Ceiling(length / map.Cell));
+            int steps = (int)Math.Min(wanted, maxSteps);
 
             for (int i = 1; i < steps; i++)
             {
