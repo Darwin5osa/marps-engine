@@ -46,6 +46,22 @@
   .sw { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
   .hint { color: var(--muted); font-size: 12px; }
   .bignum { font-size: 22px; font-weight: 600; font-variant-numeric: tabular-nums; }
+  button.sos { background: var(--red); border-color: var(--red); color: #fff; font-weight: 700; letter-spacing: .03em; padding: 10px 14px; flex: 1; }
+  button.sos:hover:not(:disabled) { filter: brightness(1.1); }
+  #emergencyBanner { display: none; margin: -4px 0 10px; padding: 8px 10px; border-radius: 6px; background: rgba(248,81,73,.15); border: 1px solid var(--red); color: var(--red); font-weight: 600; }
+  #emergencyBanner.on { display: block; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { background: rgba(248,81,73,.30); } }
+  @media (prefers-reduced-motion: reduce) { #emergencyBanner.on { animation: none; } }
+  .stops { list-style: none; margin: 0; padding: 0; }
+  .stops li { display: flex; align-items: center; gap: 8px; padding: 6px 8px; margin: 4px 0; border: 1px solid var(--line); border-radius: 6px; background: rgba(127,127,127,.05); }
+  .stops li.movable { cursor: grab; }
+  .stops li.dragging { opacity: .5; }
+  .stops li.over { border-color: var(--cyan); }
+  .stops li.fixed { color: var(--muted); border-style: dashed; }
+  .stops li .num { min-width: 20px; text-align: right; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .stops li .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .stops li button { padding: 2px 8px; }
+  .dirty { color: var(--amber); }
 </style>
 </head>
 <body>
@@ -68,6 +84,8 @@
         <span><i class="sw" style="background:#a371f7"></i>rough zone</span>
         <span><i class="sw" style="background:#39d0d8"></i>planned route</span>
         <span><i class="sw" style="background:#ff8c42"></i>HUD route</span>
+        <span><i class="sw" style="background:#ff4d6d"></i>emergency route</span>
+        <span><i class="sw" style="background:#e3b341"></i>itinerary preview</span>
         <span><i class="sw" style="background:#58a6ff"></i>astronaut</span>
       </div>
       <div class="row" style="margin-top:8px">
@@ -126,6 +144,10 @@
         <span id="latency" class="hint"></span>
       </div>
       <div class="row">
+        <button class="sos" id="btnEmergency">EMERGENCY · return to base</button>
+        <button id="btnCancelEmergency" disabled>Cancel emergency</button>
+      </div>
+      <div class="row">
         <button id="btnNearWp">Place astronaut at next target</button>
         <button id="btnMoveWp">Simulate 25 m advance</button>
       </div>
@@ -143,7 +165,20 @@
     </div>
 
     <div class="card">
+      <h2>Stop order</h2>
+      <div class="hint" style="margin-bottom:6px">Drag the stops (or use ↑ ↓) to change the visiting order. Completed stops and the departure / return base are fixed. “Apply” sends the new order to the engine, which recalculates the route to the new active stop.</div>
+      <ul id="stops" class="stops"><li class="fixed">waiting for the HUD…</li></ul>
+      <div class="row">
+        <button class="primary" id="btnApplyOrder" disabled>Apply order &amp; recalculate</button>
+        <button id="btnResetOrder" disabled>Reset</button>
+        <button id="btnPreview">Preview itinerary</button>
+      </div>
+      <div id="orderStatus" class="hint"></div>
+    </div>
+
+    <div class="card">
       <h2>HUD</h2>
+      <div id="emergencyBanner"></div>
       <div style="display:flex; justify-content:space-between; align-items:flex-start; gap:12px">
         <div>
           <div class="hint">Next target</div>
@@ -191,6 +226,10 @@
   let hudPayload = null;
   let mode = 'none';
   let autoTimer = null;
+  let pendingCmd = {};        // one-shot commands for the next HUD request (stopOrder, emergencyReturn, cancelEmergency)
+  let draftOrder = null;      // ids of the reorderable stops, as arranged in the panel
+  let orderDirty = false;     // the panel differs from the engine's order
+  let itinerary = null;       // [[{x,z}]] legs of the last itinerary preview
 
   // ---- coordinate utilities ----
   const toPx = (x, z) => [x / M.side * canvas.width, (1 - z / M.side) * canvas.height];
@@ -291,8 +330,15 @@
 
     // planned route
     drawPolyline(plannedRoute, '#39d0d8', 2.5);
-    // HUD route
-    drawPolyline(hudRoute, '#ff8c42', 3);
+    // itinerary preview (dashed)
+    if (itinerary) {
+      ctx.setLineDash([6, 5]);
+      for (const leg of itinerary) drawPolyline(leg, '#e3b341', 2);
+      ctx.setLineDash([]);
+    }
+    // HUD route (red while the emergency return is active)
+    const emergency = hudPayload && hudPayload.emergency && hudPayload.emergency.active;
+    drawPolyline(hudRoute, emergency ? '#ff4d6d' : '#ff8c42', emergency ? 4 : 3);
 
     // antennas and points
     for (const w of M.waypoints) {
@@ -471,7 +517,9 @@
       headingDeg: parseFloat($('heading').value), pitchDeg: 0,
       missionTimeS: (Date.now() / 1000) % 100000,
       activeWaypointId: $('activeWp').value || null,
+      ...pendingCmd,
     };
+    pendingCmd = {};
     await post('/api/sensor', body);
     const r = await api('/api/hud');
     hudPayload = r.hud;
@@ -520,8 +568,166 @@
       <div>elevation</div><div>${fmt(L.elevationM, 1)} m</div>
       <div>masts in view</div><div>${L.visibleAntennas} (${L.antennas.map((a) => a.id + (a.visible ? '✔' : '✖')).join(' ')})</div>`;
 
+    const em = h.emergency;
+    $('emergencyBanner').className = em && em.active ? 'on' : '';
+    $('emergencyBanner').textContent = em && em.active
+      ? (em.arrived ? `EMERGENCY · arrived at base ${em.baseId}` : `EMERGENCY · returning to base ${em.baseId}` +
+         (rt && rt.found ? ` · ${fmt(rt.remainingM, 0)} m · ~${fmt(rt.estimatedMinutes, 0)} min` : ''))
+      : '';
+    $('btnEmergency').disabled = !!(em && em.active);
+    $('btnCancelEmergency').disabled = !(em && em.active);
+
+    // Keep an unsent arrangement, minus any stop the astronaut completed meanwhile.
+    const current = reorderableIds(h);
+    if (orderDirty && draftOrder) draftOrder = draftOrder.filter((id) => current.includes(id));
+    if (!orderDirty || !draftOrder || draftOrder.length !== current.length) { draftOrder = current; orderDirty = false; }
+    renderStops(h);
+
     $('raw').textContent = JSON.stringify(h, null, 2);
   }
+
+  // ---- stop order ----
+  const typeOf = (id) => (M.waypoints.find((w) => w.id === id) || {}).type;
+
+  // Indices of the objectives that can be moved: not done, and not the departure / return base.
+  function reorderableIndices(h) {
+    const objs = h.objectives, last = objs.length - 1;
+    return objs.map((o, k) => k).filter((k) => {
+      const o = objs[k];
+      if (o.status === 'done') return false;
+      if (k === 0 && typeOf(o.id) === 'base') return false;
+      if (k === last && last > 0 && typeOf(o.id) === 'base') return false;
+      return true;
+    });
+  }
+  const reorderableIds = (h) => reorderableIndices(h).map((k) => h.objectives[k].id);
+
+  function renderStops(h) {
+    const objs = h.objectives;
+    const movable = new Set(reorderableIndices(h));
+    const nameOf = (id) => (objs.find((o) => o.id === id) || {}).name || id;
+    let draftIdx = 0, html = '', n = 0;
+    objs.forEach((o, k) => {
+      n++;
+      if (!movable.has(k)) {
+        const why = o.status === 'done' ? '✔ done' : '🔒 base';
+        html += `<li class="fixed"><span class="num">${n}</span><span class="name">${o.id} · ${o.name}</span><span class="hint">${why}</span></li>`;
+        return;
+      }
+      const i = draftIdx++;
+      const id = draftOrder[i];
+      const isActive = !orderDirty && o.status === 'active';
+      html += `<li class="movable" draggable="true" data-i="${i}">
+        <span class="num">${n}</span>
+        <span class="name ${isActive ? 'active' : ''}">${isActive ? '➤ ' : ''}${id} · ${nameOf(id)}</span>
+        <button data-move="-1" data-i="${i}" ${i === 0 ? 'disabled' : ''} aria-label="Move ${id} up">↑</button>
+        <button data-move="1" data-i="${i}" ${i === draftOrder.length - 1 ? 'disabled' : ''} aria-label="Move ${id} down">↓</button>
+      </li>`;
+    });
+    $('stops').innerHTML = html || '<li class="fixed">no stops</li>';
+    $('btnApplyOrder').disabled = !orderDirty;
+    $('btnResetOrder').disabled = !orderDirty;
+    if (orderDirty) $('orderStatus').innerHTML = '<span class="dirty">Order changed — not sent yet.</span>';
+  }
+
+  function moveStop(from, to) {
+    if (to < 0 || to >= draftOrder.length || from === to) return;
+    const [id] = draftOrder.splice(from, 1);
+    draftOrder.splice(to, 0, id);
+    orderDirty = draftOrder.join() !== reorderableIds(hudPayload).join();
+    renderStops(hudPayload);
+  }
+
+  $('stops').addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-move]');
+    if (!b) return;
+    const i = parseInt(b.dataset.i, 10);
+    moveStop(i, i + parseInt(b.dataset.move, 10));
+  });
+  let dragFrom = null;
+  $('stops').addEventListener('dragstart', (ev) => {
+    const li = ev.target.closest('li.movable'); if (!li) return;
+    dragFrom = parseInt(li.dataset.i, 10); li.classList.add('dragging');
+    ev.dataTransfer.effectAllowed = 'move';
+  });
+  $('stops').addEventListener('dragover', (ev) => {
+    const li = ev.target.closest('li.movable'); if (!li || dragFrom === null) return;
+    ev.preventDefault();
+    document.querySelectorAll('#stops li.over').forEach((x) => x.classList.remove('over'));
+    li.classList.add('over');
+  });
+  $('stops').addEventListener('drop', (ev) => {
+    const li = ev.target.closest('li.movable'); if (!li || dragFrom === null) return;
+    ev.preventDefault();
+    const to = parseInt(li.dataset.i, 10), from = dragFrom;
+    dragFrom = null;
+    moveStop(from, to);
+  });
+  $('stops').addEventListener('dragend', () => {
+    dragFrom = null;
+    document.querySelectorAll('#stops li').forEach((x) => x.classList.remove('dragging', 'over'));
+  });
+
+  $('btnResetOrder').addEventListener('click', () => {
+    orderDirty = false;
+    draftOrder = reorderableIds(hudPayload);
+    $('orderStatus').textContent = '';
+    renderStops(hudPayload);
+  });
+
+  $('btnApplyOrder').addEventListener('click', async () => {
+    $('btnApplyOrder').disabled = true;
+    try {
+      pendingCmd.stopOrder = draftOrder.slice();
+      orderDirty = false;
+      await hud();
+      const bad = hudPayload.alerts.find((a) => a.code === 'INVALID_STOP_ORDER');
+      $('orderStatus').innerHTML = bad
+        ? `<span class="fail">Rejected: ${bad.message}</span>`
+        : `Order applied. Active stop: <b>${hudPayload.route ? hudPayload.route.target : '—'}</b>` +
+          (hudPayload.route && hudPayload.route.replanned ? ' · route recalculated' : ' · active stop unchanged, route kept');
+      await previewItinerary();
+    } catch (e) { alert(e.message); }
+  });
+
+  // Plans the rest of the mission (current position → remaining stops → return) and draws it dashed.
+  async function previewItinerary() {
+    if (!hudPayload) return;
+    const objs = hudPayload.objectives;
+    const movable = new Set(reorderableIndices(hudPayload));
+    let i = 0;
+    const order = [];
+    objs.forEach((o, k) => {
+      if (movable.has(k)) order.push(draftOrder[i++]);
+      else if (o.status !== 'done') order.push(o.id);
+    });
+    if (!order.length) { itinerary = null; draw(); return; }
+    const r = await post('/api/itinerary', { fromX: astro.x, fromZ: astro.z, order });
+    itinerary = r.legs.map((l) => l.points);
+    const legs = r.legs.map((l) => `${l.target} ${fmt(l.lengthM, 0)} m${l.found ? '' : ' ✖'}`).join(' → ');
+    $('orderStatus').innerHTML += `<div>Itinerary: ${legs}<br>total <b>${fmt(r.lengthM, 0)} m · ${fmt(r.minutes, 1)} min</b>` +
+      `${r.found ? '' : ' · <span class="fail">some leg has no safe route</span>'} <span class="hint">(${fmt(r.totalMs, 0)} ms)</span></div>`;
+    draw();
+  }
+
+  $('btnPreview').addEventListener('click', async () => {
+    $('btnPreview').disabled = true;
+    try {
+      if (!orderDirty) $('orderStatus').textContent = '';
+      await previewItinerary();
+    } catch (e) { alert(e.message); } finally { $('btnPreview').disabled = false; }
+  });
+
+  // ---- emergency ----
+  $('btnEmergency').addEventListener('click', async () => {
+    pendingCmd.emergencyReturn = true;
+    itinerary = null;
+    try { await hud(); } catch (e) { alert(e.message); }
+  });
+  $('btnCancelEmergency').addEventListener('click', async () => {
+    pendingCmd.cancelEmergency = true;
+    try { await hud(); } catch (e) { alert(e.message); }
+  });
 
   function arrow(rel) {
     const a = Math.abs(rel);

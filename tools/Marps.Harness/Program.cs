@@ -114,6 +114,35 @@ app.MapPost("/api/route", (RouteQuery q) =>
     }, MarpsJson.Options);
 });
 
+// Full itinerary preview: every leg from a start point through the given places, in order.
+app.MapPost("/api/itinerary", (ItineraryQuery q) =>
+{
+    if (q == null || !RouteQuery.IsFinite(q.FromX) || !RouteQuery.IsFinite(q.FromZ) || q.Order == null || q.Order.Count == 0)
+        return Results.BadRequest(new { error = "fromX, fromZ (finite numbers) and a non-empty order are required." });
+    if (q.Order.Any(id => mission.Find(id) == null))
+        return Results.BadRequest(new { error = "order contains an unknown place id." });
+
+    var clock = Stopwatch.StartNew();
+    var legs = engine.PlanItinerary(new Point2(q.FromX.Value, q.FromZ.Value), q.Order);
+    clock.Stop();
+    return Results.Json(new
+    {
+        found = legs.All(l => l.Route.Found),
+        lengthM = legs.Sum(l => l.Route.HorizontalLengthM),
+        minutes = legs.Sum(l => l.Route.EstimatedMinutes),
+        totalMs = clock.Elapsed.TotalMilliseconds,
+        legs = legs.Select(l => new
+        {
+            target = l.TargetId,
+            found = l.Route.Found,
+            lengthM = l.Route.HorizontalLengthM,
+            minutes = l.Route.EstimatedMinutes,
+            maxSlopeDeg = l.Route.MaxEdgeSlopeDeg,
+            points = PathSimplifier.Simplify(l.Route.Points, 1.0),
+        }),
+    }, MarpsJson.Options);
+});
+
 // Astronaut state "sent" by the test helmet.
 app.MapPost("/api/sensor", (NavigationRequest req) =>
 {
@@ -190,6 +219,13 @@ public sealed class RouteQuery
     public static bool IsFinite(double? v) => v.HasValue && double.IsFinite(v.Value);
 }
 
+public sealed class ItineraryQuery
+{
+    public double? FromX { get; set; }
+    public double? FromZ { get; set; }
+    public List<string> Order { get; set; }
+}
+
 
 
 /// <summary>Test sensor: the state is set by the web page (POST /api/sensor).</summary>
@@ -208,7 +244,7 @@ public sealed class WebSensor : IAstronautSensor
         lock (_lock)
         {
             // Copy so the engine can annotate fields without touching the stored state.
-            return new NavigationRequest
+            var copy = new NavigationRequest
             {
                 SessionId = _state.SessionId,
                 X = _state.X,
@@ -219,6 +255,14 @@ public sealed class WebSensor : IAstronautSensor
                 ActiveWaypointId = _state.ActiveWaypointId,
                 ForceReplan = _state.ForceReplan,
             };
+            // Button presses (new stop order, emergency on / off) are delivered once, like a real helmet event.
+            copy.StopOrder = _state.StopOrder;
+            copy.EmergencyReturn = _state.EmergencyReturn;
+            copy.CancelEmergency = _state.CancelEmergency;
+            _state.StopOrder = null;
+            _state.EmergencyReturn = false;
+            _state.CancelEmergency = false;
+            return copy;
         }
     }
 }
