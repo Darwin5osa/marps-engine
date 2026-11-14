@@ -62,20 +62,24 @@ namespace Marps.Engine.Navigation
         {
             // The worker owns its own router: AStarRouter reuses arrays and is not thread-safe.
             var workerRouter = new AStarRouter(_map, model, routeOptions);
-            _planJobs = new BlockingCollection<PlanJob>();
+            _planJobs = new BlockingCollection<PlanJob>(MaxPendingPlans);
             _planResults = new ConcurrentQueue<PlanJob>();
             _planWorker = new Thread(() =>
             {
                 foreach (var job in _planJobs.GetConsumingEnumerable())
                 {
-                    try
+                    // A session evicted while its job waited in the queue no longer needs the route.
+                    if (!job.Session.Evicted)
                     {
-                        job.Result = workerRouter.Find(job.From, job.To);
-                    }
-                    catch (Exception)
-                    {
-                        // A failed search must not kill the worker; the session simply reports no route.
-                        job.Result = RouteResult.NotFound(0, 0);
+                        try
+                        {
+                            job.Result = workerRouter.Find(job.From, job.To);
+                        }
+                        catch (Exception)
+                        {
+                            // A failed search must not kill the worker; the session simply reports no route.
+                            job.Result = RouteResult.NotFound(0, 0);
+                        }
                     }
                     _planResults.Enqueue(job);
                 }
@@ -87,10 +91,16 @@ namespace Marps.Engine.Navigation
             _planWorker.Start();
         }
 
+        /// <summary>Upper bound on queued route searches, so churn in sessions cannot grow the queue without limit.</summary>
+        private const int MaxPendingPlans = 256;
+
+        /// <summary>
+        /// Queues a route search without blocking. When the queue is full nothing is queued and the session
+        /// asks again on a later call.
+        /// </summary>
         private void EnqueuePlan(string sessionId, SessionState session, Point2 from, Waypoint target)
         {
-            session.PlanPending = true;
-            _planJobs.Add(new PlanJob
+            bool queued = _planJobs.TryAdd(new PlanJob
             {
                 SessionId = sessionId,
                 Session = session,
@@ -98,6 +108,7 @@ namespace Marps.Engine.Navigation
                 From = from,
                 To = target.Position,
             });
+            session.PlanPending = queued;
         }
 
         /// <summary>
@@ -112,6 +123,11 @@ namespace Marps.Engine.Navigation
             while (_planResults.TryDequeue(out var job))
             {
                 if (!_sessions.TryGetValue(job.SessionId, out var s) || !ReferenceEquals(s, job.Session)) continue;
+                if (job.Result == null)
+                {
+                    s.PlanPending = false;      // the search was skipped; the session will ask again
+                    continue;
+                }
                 s.Route = job.Result;
                 s.TargetId = job.TargetId;
                 s.PrepareCumulative(_options.PolylineToleranceM);
@@ -463,7 +479,11 @@ namespace Marps.Engine.Navigation
                     oldestId = pair.Key;
                 }
             }
-            if (oldestId != null) _sessions.Remove(oldestId);
+            if (oldestId != null)
+            {
+                _sessions[oldestId].Evicted = true;
+                _sessions.Remove(oldestId);
+            }
         }
 
         private sealed class SessionState
@@ -473,6 +493,9 @@ namespace Marps.Engine.Navigation
 
             /// <summary>True while a background search for this session is running.</summary>
             public bool PlanPending { get; set; }
+
+            /// <summary>Set when the session is discarded from the cache. Read by the worker thread.</summary>
+            public volatile bool Evicted;
 
             /// <summary>Index of the current step. Previous steps are completed.</summary>
             public int Step { get; set; }
