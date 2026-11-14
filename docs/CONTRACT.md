@@ -123,6 +123,40 @@ Example (position at base, looking east):
 - **Objectives** (`objectives[].status`): `done`, `active`, `pending`. The base appears on departure (step 0) and on return (last step).
 - **Layers** (`layers`): slope underfoot, hazard class, elevation, masts in line of sight.
 
+## Engine interface: `INavigationEngine`
+
+Frontends depend on `Marps.Engine.Abstractions.INavigationEngine` (implemented by `NavigationEngine`, thread-safe), not on the concrete class. `NavigationService` also takes the interface.
+
+| member | use |
+|---|---|
+| `Map`, `Mission`, `Base` | terrain, mission and the emergency base (null if none) |
+| `Update(NavigationRequest)` | one navigation step (all request fields above) |
+| `ReorderStops(current, stopOrder)` | same as sending `stopOrder`; returns the updated step |
+| `StartEmergencyReturn(current)` / `CancelEmergencyReturn(current)` | same as `emergencyReturn` / `cancelEmergency` |
+| `PlanRoute(from, to)` | safe route between two points, no session |
+| `PlanItinerary(from, placeIds)` | every leg through mission places, in order |
+| `PlanTrip(TripRequest)` / `PlanTrip(current, stops, destination)` | route from the current point through the stops to the destination (below) |
+
+The convenience methods copy the request they are given; the caller's object is never changed.
+
+### Trip planning (`PlanTrip`)
+
+Input (`TripRequest`):
+
+```json
+{
+  "x": 300, "z": 1700,
+  "stops": [ { "id": "P2" }, { "x": 1000, "z": 1000 } ],
+  "destination": { "id": "B" }
+}
+```
+
+- A stop or destination is a mission place (`id`) or a free point (`x`, `z`). If both are sent, `id` wins. `stops` may be empty (direct route).
+- Output (`TripPlan`): `found` (every leg has a safe route), totals (`lengthM`, `estimatedMinutes`, `ascentM`, `descentM`, `maxSlopeDeg`), `legs[]` (`index`, `toId` — null for free points —, `fromX/Z`, `toX/Z`, `found`, statistics and `points`), the joined `points` from the current point to the destination, and `computeMs`.
+- A leg with no safe route has `found: false` and no points. The next leg still starts at that stop, so the rest of the trip is reported. The joined `points` is empty when any leg is missing.
+- Bad input (no destination, unknown id, a stop with neither id nor finite `x`/`z`, non-finite position) does not throw: `error` explains it and no search runs.
+- It does not touch any session: it is a plan, not navigation.
+
 ## Harness HTTP API (testing only)
 
 | method | path | use |
@@ -133,6 +167,7 @@ Example (position at base, looking east):
 | POST | `/api/sensor` | sets the test astronaut's state |
 | GET | `/api/hud` | runs one service step and returns `{ hud, serverMs }` |
 | POST | `/api/navigate` | shortcut: `NavigationRequest` → `{ hud, serverMs }` |
+| POST | `/api/trip` | `TripRequest` → `{ trip: TripPlan, serverMs }`; bad input → 400 `{ error }` |
 | POST | `/api/itinerary` | `{fromX, fromZ, order: [ids]}` → every leg through the given places, with totals (reorder preview) |
 
 ## Data files

@@ -13,12 +13,12 @@ namespace Marps.Engine.Navigation
     /// </summary>
     public sealed class NavigationService
     {
-        private readonly NavigationEngine _engine;
+        private readonly INavigationEngine _engine;
         private readonly IAstronautSensor _sensor;
         private readonly IHudSink _sink;
         private readonly ISpaceWeatherProvider _weather;
 
-        public NavigationService(NavigationEngine engine, IAstronautSensor sensor, IHudSink sink,
+        public NavigationService(INavigationEngine engine, IAstronautSensor sensor, IHudSink sink,
             ISpaceWeatherProvider weather = null)
         {
             _engine = engine ?? throw new ArgumentNullException(nameof(engine));

@@ -31,7 +31,7 @@ ITerrainProvider terrainProvider = new FileTerrainProvider(processed);
 TerrainMap terrain = terrainProvider.Load();
 MissionDefinition mission = MissionLoader.Load(
     Path.Combine(dataDir, "mission.json"), Path.Combine(dataDir, "hazards.json"), terrain.Meta);
-var engine = new NavigationEngine(terrain, mission);
+INavigationEngine engine = new NavigationEngine(terrain, mission);
 
 var sensor = new WebSensor();
 var sink = new LastHudSink();
@@ -115,6 +115,17 @@ app.MapPost("/api/route", (RouteQuery q) =>
 });
 
 // Full itinerary preview: every leg from a start point through the given places, in order.
+// Trip: current position -> stops (place ids or free points) -> destination. Bad input comes back as 400 with the reason.
+app.MapPost("/api/trip", (TripRequest req) =>
+{
+    if (req == null) return Results.BadRequest(new { error = "A JSON body with x, z, stops and destination is required." });
+    var clock = Stopwatch.StartNew();
+    TripPlan plan = engine.PlanTrip(req);
+    clock.Stop();
+    if (plan.Error != null) return Results.BadRequest(new { error = plan.Error });
+    return Results.Json(new { trip = plan, serverMs = clock.Elapsed.TotalMilliseconds }, MarpsJson.Options);
+});
+
 app.MapPost("/api/itinerary", (ItineraryQuery q) =>
 {
     if (q == null || !RouteQuery.IsFinite(q.FromX) || !RouteQuery.IsFinite(q.FromZ) || q.Order == null || q.Order.Count == 0)

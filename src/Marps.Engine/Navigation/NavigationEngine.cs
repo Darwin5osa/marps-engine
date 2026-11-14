@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
 using System.Threading;
+using Marps.Engine.Abstractions;
 using Marps.Engine.Geometry;
 using Marps.Engine.Mission;
 using Marps.Engine.Routing;
@@ -18,7 +19,7 @@ namespace Marps.Engine.Navigation
     /// With <see cref="NavigationOptions.BackgroundReplanning"/> the route search runs on a worker thread
     /// and the instance should be disposed when it is no longer used.
     /// </summary>
-    public sealed class NavigationEngine : IDisposable
+    public sealed class NavigationEngine : INavigationEngine
     {
         private readonly TerrainMap _map;
         private readonly MissionDefinition _mission;
@@ -203,6 +204,160 @@ namespace Marps.Engine.Navigation
                 }
             }
             return legs;
+        }
+
+        public TripPlan PlanTrip(Point2 current, IEnumerable<Point2> stops, Point2 destination)
+        {
+            var request = new TripRequest { X = current.X, Z = current.Z, Destination = TripStop.At(destination) };
+            if (stops != null)
+                foreach (var s in stops) request.Stops.Add(TripStop.At(s));
+            return PlanTrip(request);
+        }
+
+        public TripPlan PlanTrip(TripRequest request)
+        {
+            if (request == null) throw new ArgumentNullException(nameof(request));
+            var clock = Stopwatch.StartNew();
+            var plan = new TripPlan();
+
+            // Resolve every point before searching, so bad input costs nothing.
+            if (!double.IsFinite(request.X) || !double.IsFinite(request.Z))
+                return Fail(plan, "The current position must be finite numbers.", clock);
+            if (request.Destination == null)
+                return Fail(plan, "A destination is required.", clock);
+
+            var points = new List<(string Id, Point2 Pos)>();
+            var stops = request.Stops ?? new List<TripStop>();
+            for (int i = 0; i <= stops.Count; i++)
+            {
+                TripStop stop = i < stops.Count ? stops[i] : request.Destination;
+                string label = i < stops.Count ? $"Stop {i + 1}" : "Destination";
+                string error = ResolveStop(stop, label, out string id, out Point2 pos);
+                if (error != null) return Fail(plan, error, clock);
+                points.Add((id, pos));
+            }
+
+            plan.Found = true;
+            var whole = new List<Point2>();
+            lock (_lock)
+            {
+                Point2 current = new Point2(request.X, request.Z);
+                for (int i = 0; i < points.Count; i++)
+                {
+                    RouteResult r = _router.Find(current, points[i].Pos);
+                    var leg = new TripLeg
+                    {
+                        Index = i,
+                        ToId = points[i].Id,
+                        FromX = current.X,
+                        FromZ = current.Z,
+                        ToX = points[i].Pos.X,
+                        ToZ = points[i].Pos.Z,
+                        Found = r.Found,
+                    };
+                    if (r.Found)
+                    {
+                        leg.LengthM = r.HorizontalLengthM;
+                        leg.EstimatedMinutes = r.EstimatedMinutes;
+                        leg.AscentM = r.AscentM;
+                        leg.DescentM = r.DescentM;
+                        leg.MaxSlopeDeg = r.MaxEdgeSlopeDeg;
+                        leg.Points = PathSimplifier.Simplify(r.Points, _options.PolylineToleranceM);
+
+                        plan.LengthM += leg.LengthM;
+                        plan.EstimatedMinutes += leg.EstimatedMinutes;
+                        plan.AscentM += leg.AscentM;
+                        plan.DescentM += leg.DescentM;
+                        plan.MaxSlopeDeg = Math.Max(plan.MaxSlopeDeg, leg.MaxSlopeDeg);
+                        // Join the legs without repeating the shared point.
+                        int skip = whole.Count > 0 && leg.Points.Count > 0 && whole[whole.Count - 1].DistanceTo(leg.Points[0]) < 1e-9 ? 1 : 0;
+                        for (int k = skip; k < leg.Points.Count; k++) whole.Add(leg.Points[k]);
+                    }
+                    else
+                    {
+                        // The next leg still starts at this stop, so the rest of the trip is reported anyway.
+                        plan.Found = false;
+                    }
+                    plan.Legs.Add(leg);
+                    current = points[i].Pos;
+                }
+            }
+            plan.Points = plan.Found ? whole : new List<Point2>();
+            clock.Stop();
+            plan.ComputeMs = clock.Elapsed.TotalMilliseconds;
+            return plan;
+        }
+
+        private string ResolveStop(TripStop stop, string label, out string id, out Point2 pos)
+        {
+            id = null;
+            pos = default(Point2);
+            if (stop == null) return $"{label} is empty.";
+            if (!string.IsNullOrEmpty(stop.Id))
+            {
+                var wp = _mission.Find(stop.Id);
+                if (wp == null) return $"{label}: unknown place '{stop.Id}'.";
+                id = wp.Id;
+                pos = wp.Position;
+                return null;
+            }
+            if (!stop.X.HasValue || !stop.Z.HasValue || !double.IsFinite(stop.X.Value) || !double.IsFinite(stop.Z.Value))
+                return $"{label} needs a place id or finite x and z.";
+            pos = new Point2(stop.X.Value, stop.Z.Value);
+            return null;
+        }
+
+        private static TripPlan Fail(TripPlan plan, string error, Stopwatch clock)
+        {
+            plan.Found = false;
+            plan.Error = error;
+            plan.ComputeMs = clock.Elapsed.TotalMilliseconds;
+            return plan;
+        }
+
+        public NavigationResponse ReorderStops(NavigationRequest current, IList<string> stopOrder)
+        {
+            if (stopOrder == null) throw new ArgumentNullException(nameof(stopOrder));
+            var req = CopyOf(current);
+            req.StopOrder = new List<string>(stopOrder);
+            return Update(req);
+        }
+
+        public NavigationResponse StartEmergencyReturn(NavigationRequest current)
+        {
+            var req = CopyOf(current);
+            req.EmergencyReturn = true;
+            req.CancelEmergency = false;
+            return Update(req);
+        }
+
+        public NavigationResponse CancelEmergencyReturn(NavigationRequest current)
+        {
+            var req = CopyOf(current);
+            req.CancelEmergency = true;
+            req.EmergencyReturn = false;
+            return Update(req);
+        }
+
+        /// <summary>Copy of a request, so the convenience methods never change the caller's object.</summary>
+        private static NavigationRequest CopyOf(NavigationRequest r)
+        {
+            if (r == null) throw new ArgumentNullException("current");
+            return new NavigationRequest
+            {
+                SessionId = r.SessionId,
+                X = r.X,
+                Z = r.Z,
+                HeadingDeg = r.HeadingDeg,
+                PitchDeg = r.PitchDeg,
+                MissionTimeS = r.MissionTimeS,
+                ActiveWaypointId = r.ActiveWaypointId,
+                ForceReplan = r.ForceReplan,
+                StopOrder = r.StopOrder,
+                EmergencyReturn = r.EmergencyReturn,
+                CancelEmergency = r.CancelEmergency,
+                SpaceWeather = r.SpaceWeather,
+            };
         }
 
         /// <summary>
