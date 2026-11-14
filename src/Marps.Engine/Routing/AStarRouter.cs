@@ -25,8 +25,9 @@ namespace Marps.Engine.Routing
         private readonly double _heuristicWeight;
         private readonly float[] _g;
         private readonly int[] _parent;
-        private readonly int[] _openStamp;
-        private readonly int[] _closedStamp;
+        // One stamp per node. For search s: open = 2s, closed = 2s + 1. Anything older is "untouched".
+        private readonly int[] _stamp;
+        private const int MaxSearchId = (int.MaxValue - 2) / 2;
         private readonly MinHeap _heap;
         private int _search;
 
@@ -41,8 +42,7 @@ namespace Marps.Engine.Routing
             int n = map.Width * map.Height;
             _g = new float[n];
             _parent = new int[n];
-            _openStamp = new int[n];
-            _closedStamp = new int[n];
+            _stamp = new int[n];
             _heap = new MinHeap(4096);
         }
 
@@ -70,18 +70,18 @@ namespace Marps.Engine.Routing
             int goal = _map.Index(gc, gr);
 
             _search++;
-            if (_search == int.MaxValue)
+            if (_search > MaxSearchId)
             {
-                Array.Clear(_openStamp, 0, _openStamp.Length);
-                Array.Clear(_closedStamp, 0, _closedStamp.Length);
+                Array.Clear(_stamp, 0, _stamp.Length);
                 _search = 1;
             }
-            int s = _search;
+            int open = 2 * _search;
+            int closed = open + 1;
 
             _heap.Clear();
             _g[start] = 0f;
             _parent[start] = -1;
-            _openStamp[start] = s;
+            _stamp[start] = open;
             _heap.Push((float)Heuristic(start, goal, w, cell), start);
 
             int expansions = 0;
@@ -89,8 +89,8 @@ namespace Marps.Engine.Routing
             while (_heap.Count > 0)
             {
                 int cur = _heap.Pop();
-                if (_closedStamp[cur] == s) continue;
-                _closedStamp[cur] = s;
+                if (_stamp[cur] == closed) continue;
+                _stamp[cur] = closed;
                 expansions++;
                 if (cur == goal)
                 {
@@ -108,7 +108,7 @@ namespace Marps.Engine.Routing
                     if (nc < 0 || nr < 0 || nc >= w || nr >= h) continue;
 
                     int n = nr * w + nc;
-                    if (_closedStamp[n] == s || hazard[n] == 2) continue;
+                    if (_stamp[n] == closed || hazard[n] == 2) continue;
 
                     bool diagonal = Dc[k] != 0 && Dr[k] != 0;
                     double horizontal = diagonal ? cell * Sqrt2 : cell;
@@ -119,9 +119,9 @@ namespace Marps.Engine.Routing
                     if (hazard[n] == 3) step *= _options.RoughFactor;
 
                     double tentative = gCur + step;
-                    if (_openStamp[n] != s || tentative < _g[n])
+                    if (_stamp[n] < open || tentative < _g[n])
                     {
-                        _openStamp[n] = s;
+                        _stamp[n] = open;
                         _g[n] = (float)tentative;
                         _parent[n] = cur;
                         _heap.Push((float)(tentative + Heuristic(n, goal, w, cell)), n);
