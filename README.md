@@ -43,6 +43,30 @@ dotnet run --project tools/Marps.Harness
 
 To use another data folder: set the `MARPS_DATA` environment variable to the folder that contains `processed/`.
 
+## Simulating a Quest 2
+
+There is no Quest 2 emulator for .NET, so `tools/Marps.Quest2Sim` approximates the load on the headset:
+one pinned core, the real mission walk at 72 Hz or 5 Hz, and the frame budget. It reports time per call,
+bytes allocated per call (which drive Mono GC pauses) and collections.
+
+```bash
+dotnet run -c Release --project tools/Marps.Quest2Sim -- context --frames 20000
+dotnet run -c Release --project tools/Marps.Quest2Sim -- context --background true   # worker-thread replanning
+```
+
+`--cpu-factor` scales the measured times once they are calibrated on a headset. The results on this PC are
+in `context/quest2_robustness_results.md` (not versioned).
+
+## Modes and fault handling
+
+- `NavigationOptions.BackgroundReplanning` (default `false`): route searches run on a worker thread, and a
+  call that needs a new route returns the previous one with `route.pending = true`. Recommended on the
+  headset so searches do not block the frame. Dispose the engine when done.
+- `NavigationOptions.MaxSessions` (default `4096`): sessions kept in memory; the least recently used one is dropped.
+- `NavigationService` keeps running when the sensor, the weather provider or the HUD sink fail. Each failure is
+  counted (`SensorFaults`, `WeatherFaults`, `SinkFaults`), reported as an alert, and the loop continues.
+- Terrain data with non-finite heights or hazard codes outside 0..3 is rejected when it is loaded.
+
 ## Trying it in the browser
 
 At `http://localhost:5080`:
