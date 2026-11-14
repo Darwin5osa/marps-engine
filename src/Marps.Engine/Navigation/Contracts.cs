@@ -59,6 +59,8 @@ namespace Marps.Engine.Navigation
         public string Target { get; set; }
         public bool Found { get; set; }
         public bool Replanned { get; set; }
+        /// <summary>True while a new route is being computed in the background; the route shown is the previous one.</summary>
+        public bool Pending { get; set; }
         public double LengthM { get; set; }
         public double RemainingM { get; set; }
         public double EstimatedMinutes { get; set; }

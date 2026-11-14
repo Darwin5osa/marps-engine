@@ -44,6 +44,8 @@ Console.WriteLine($"  .NET {Environment.Version}, {Environment.OSVersion}, works
 
 var terrain = TerrainFiles.Load(Path.Combine(dataDir, "processed"));
 var mission = MissionLoader.Load(Path.Combine(dataDir, "mission.json"), Path.Combine(dataDir, "hazards.json"), terrain.Meta);
+bool background = Arg(args, "--background", "false") == "true";
+NavigationEngine Make() => new NavigationEngine(terrain, mission, new NavigationOptions { BackgroundReplanning = background });
 
 // Path the astronaut walks: B -> P1 -> P2 -> P3 -> P4 -> B, following the planned routes.
 var planner = new NavigationEngine(terrain, mission);
@@ -126,7 +128,7 @@ static double Pct(double[] xs, double p)
 }
 
 // Scenario 1: walking the mission at 72 Hz (frame rate of the headset).
-var e1 = new NavigationEngine(terrain, mission);
+var e1 = Make();
 double step72 = speed / FrameHz;
 Run("walk, 72 Hz", frames, i =>
 {
@@ -137,7 +139,7 @@ Run("walk, 72 Hz", frames, i =>
 }, e1);
 
 // Scenario 2: same walk sampled at 5 Hz (the rate suggested by the contract).
-var e2 = new NavigationEngine(terrain, mission);
+var e2 = Make();
 double step5 = speed / 5.0;
 Run("walk, 5 Hz", 5000, i =>
 {
@@ -148,7 +150,7 @@ Run("walk, 5 Hz", 5000, i =>
 }, e2);
 
 // Scenario 3: standing still at the base, looking around, 72 Hz (the common HUD case).
-var e3 = new NavigationEngine(terrain, mission);
+var e3 = Make();
 var baseP = mission.Find("B").Position;
 Run("idle at base, 72 Hz", frames, i =>
 {
@@ -157,7 +159,7 @@ Run("idle at base, 72 Hz", frames, i =>
 }, e3);
 
 // Scenario 4: worst case, the position jumps to a random spot every call (forces a replan each time).
-var e4 = new NavigationEngine(terrain, mission);
+var e4 = Make();
 var rnd = new Random(7);
 Run("replan every call (random jumps)", 300, i =>
     new NavigationRequest { SessionId = "jumper", X = 100 + rnd.NextDouble() * 1800, Z = 100 + rnd.NextDouble() * 1800, HeadingDeg = rnd.Next(360) }, e4, warmup: 20);

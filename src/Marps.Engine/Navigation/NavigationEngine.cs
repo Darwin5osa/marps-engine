@@ -1,7 +1,9 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
+using System.Threading;
 using Marps.Engine.Geometry;
 using Marps.Engine.Mission;
 using Marps.Engine.Routing;
@@ -13,8 +15,10 @@ namespace Marps.Engine.Navigation
     /// Navigation engine. No frontend dependencies: takes a <see cref="NavigationRequest"/>
     /// and returns a <see cref="NavigationResponse"/>. Keeps one session per astronaut
     /// (completed objectives and cached route). One instance serves calls one at a time (lock).
+    /// With <see cref="NavigationOptions.BackgroundReplanning"/> the route search runs on a worker thread
+    /// and the instance should be disposed when it is no longer used.
     /// </summary>
-    public sealed class NavigationEngine
+    public sealed class NavigationEngine : IDisposable
     {
         private readonly TerrainMap _map;
         private readonly MissionDefinition _mission;
@@ -32,10 +36,100 @@ namespace Marps.Engine.Navigation
             _options = options ?? new NavigationOptions();
             if (routeOptions == null) routeOptions = new RouteOptions { MaxSlopeDeg = _options.MaxSlopeDeg };
             _router = new AStarRouter(map, model, routeOptions);
+            if (_options.BackgroundReplanning) StartPlanWorker(model, routeOptions);
         }
 
         public TerrainMap Map => _map;
         public MissionDefinition Mission => _mission;
+
+        // ---- background route planning ----
+
+        private sealed class PlanJob
+        {
+            public string SessionId;
+            public SessionState Session;
+            public string TargetId;
+            public Point2 From;
+            public Point2 To;
+            public RouteResult Result;
+        }
+
+        private BlockingCollection<PlanJob> _planJobs;
+        private ConcurrentQueue<PlanJob> _planResults;
+        private Thread _planWorker;
+
+        private void StartPlanWorker(WalkingModel model, RouteOptions routeOptions)
+        {
+            // The worker owns its own router: AStarRouter reuses arrays and is not thread-safe.
+            var workerRouter = new AStarRouter(_map, model, routeOptions);
+            _planJobs = new BlockingCollection<PlanJob>();
+            _planResults = new ConcurrentQueue<PlanJob>();
+            _planWorker = new Thread(() =>
+            {
+                foreach (var job in _planJobs.GetConsumingEnumerable())
+                {
+                    try
+                    {
+                        job.Result = workerRouter.Find(job.From, job.To);
+                    }
+                    catch (Exception)
+                    {
+                        // A failed search must not kill the worker; the session simply reports no route.
+                        job.Result = RouteResult.NotFound(0, 0);
+                    }
+                    _planResults.Enqueue(job);
+                }
+            })
+            {
+                IsBackground = true,
+                Name = "Marps route planner",
+            };
+            _planWorker.Start();
+        }
+
+        private void EnqueuePlan(string sessionId, SessionState session, Point2 from, Waypoint target)
+        {
+            session.PlanPending = true;
+            _planJobs.Add(new PlanJob
+            {
+                SessionId = sessionId,
+                Session = session,
+                TargetId = target.Id,
+                From = from,
+                To = target.Position,
+            });
+        }
+
+        /// <summary>
+        /// Applies the routes the worker has finished (called with the lock held).
+        /// Returns true if one of them belongs to <paramref name="sessionId"/>.
+        /// Results for sessions that were evicted in the meantime are dropped.
+        /// </summary>
+        private bool ApplyCompletedPlans(string sessionId)
+        {
+            if (_planResults == null) return false;
+            bool forThisSession = false;
+            while (_planResults.TryDequeue(out var job))
+            {
+                if (!_sessions.TryGetValue(job.SessionId, out var s) || !ReferenceEquals(s, job.Session)) continue;
+                s.Route = job.Result;
+                s.TargetId = job.TargetId;
+                s.PrepareCumulative(_options.PolylineToleranceM);
+                s.PlanPending = false;
+                if (job.SessionId == sessionId) forThisSession = true;
+            }
+            return forThisSession;
+        }
+
+        /// <summary>Stops the background planner (no effect when background replanning is off).</summary>
+        public void Dispose()
+        {
+            if (_planJobs == null) return;
+            _planJobs.CompleteAdding();
+            _planWorker.Join(TimeSpan.FromSeconds(5));
+            _planJobs.Dispose();
+            _planJobs = null;
+        }
 
         /// <summary>Direct route between two points, without a session (for planning from tools).</summary>
         public RouteResult PlanRoute(Point2 from, Point2 to)
@@ -110,7 +204,7 @@ namespace Marps.Engine.Navigation
                 Waypoint target = session.Step < steps.Count ? _mission.Find(steps[session.Step]) : null;
 
                 // 3. Route: recalculated if the target changed, if requested, or if the astronaut moved away from the route.
-                bool replanned = false;
+                bool replanned = ApplyCompletedPlans(sid);
                 if (target != null)
                 {
                     bool needPlan = session.Route == null || session.TargetId != target.Id || req.ForceReplan;
@@ -119,15 +213,22 @@ namespace Marps.Engine.Navigation
                         session.Nearest(pos, out _, out double offDist);
                         needPlan = offDist > _options.OffRouteM;
                     }
-                    if (needPlan)
+                    if (needPlan && _options.BackgroundReplanning)
+                    {
+                        // Do not block: the search runs on the worker thread and is applied on a later call.
+                        // Meanwhile the previous route (if any) is returned with Pending = true.
+                        if (!session.PlanPending) EnqueuePlan(sid, session, pos, target);
+                    }
+                    else if (needPlan)
                     {
                         session.Route = _router.Find(pos, target.Position);
                         session.TargetId = target.Id;
-                        session.PrepareCumulative();
+                        session.PrepareCumulative(_options.PolylineToleranceM);
                         replanned = true;
                     }
 
                     response.Route = BuildRouteInfo(session, target, pos, replanned);
+                    response.Route.Pending = session.PlanPending;
                     response.NextWaypoint = BuildNextWaypoint(target, pos, req.HeadingDeg);
                 }
                 else
@@ -135,7 +236,7 @@ namespace Marps.Engine.Navigation
                     response.MissionComplete = true;
                     session.Route = null;
                     session.TargetId = null;
-                    session.PrepareCumulative();
+                    session.PrepareCumulative(_options.PolylineToleranceM);
                 }
 
                 for (int k = 0; k < steps.Count; k++)
@@ -183,10 +284,31 @@ namespace Marps.Engine.Navigation
             int i = s.Nearest(pos, out _, out double d);
             info.RemainingM = (s.Cumulative[s.Cumulative.Count - 1] - s.Cumulative[i]) + d;
 
-            var tail = new List<Point2> { pos };
-            for (int k = i; k < route.Points.Count; k++) tail.Add(route.Points[k]);
-            info.Points = PathSimplifier.Simplify(tail, _options.PolylineToleranceM);
+            // Send the astronaut's position followed by the remaining part of the precomputed simplified route.
+            var simplified = s.Simplified;
+            int from = simplified.Count == 0 ? 0 : NearestIndex(simplified, pos);
+            var points = new List<Point2>(simplified.Count - from + 1) { pos };
+            if (simplified.Count > 0) points.AddRange(simplified.GetRange(from, simplified.Count - from));
+            info.Points = points;
             return info;
+        }
+
+        /// <summary>Index of the point in the list closest to p (the list must not be empty).</summary>
+        private static int NearestIndex(List<Point2> points, Point2 p)
+        {
+            int best = 0;
+            double bestSq = double.MaxValue;
+            for (int i = 0; i < points.Count; i++)
+            {
+                double dx = points[i].X - p.X, dz = points[i].Z - p.Z;
+                double sq = dx * dx + dz * dz;
+                if (sq < bestSq)
+                {
+                    bestSq = sq;
+                    best = i;
+                }
+            }
+            return best;
         }
 
         private NextWaypointInfo BuildNextWaypoint(Waypoint target, Point2 pos, double headingDeg)
@@ -205,28 +327,43 @@ namespace Marps.Engine.Navigation
             };
         }
 
+        private const int MaxNearbyHazards = 10;
+
+        /// <summary>The closest hazard zones within HazardRadiusM, nearest first (at most 10).</summary>
         private List<HazardInfo> NearbyHazards(Point2 pos)
         {
-            return _mission.HazardZones
-                .Select(z => new { Zone = z, Dist = z.DistanceTo(pos) })
-                .Where(x => x.Dist <= _options.HazardRadiusM)
-                .OrderBy(x => x.Dist)
-                .Take(10)
-                .Select(x => new HazardInfo
-                {
-                    Type = x.Zone.Type,
-                    Severity = x.Zone.Severity,
-                    DistanceM = x.Dist,
-                    CenterX = x.Zone.Center.X,
-                    CenterZ = x.Zone.Center.Z,
-                    BoxMinX = x.Zone.BoxMin.X,
-                    BoxMinZ = x.Zone.BoxMin.Z,
-                    BoxMaxX = x.Zone.BoxMax.X,
-                    BoxMaxZ = x.Zone.BoxMax.Z,
-                    MaxSlopeDeg = x.Zone.MaxSlopeDeg,
-                    AreaM2 = x.Zone.AreaM2,
-                }).ToList();
+            // Insertion into a short sorted list: no LINQ, no temporary objects for zones that are out of range.
+            var result = new List<HazardInfo>(MaxNearbyHazards);
+            var zones = _mission.HazardZones;
+            for (int i = 0; i < zones.Count; i++)
+            {
+                var zone = zones[i];
+                double d = zone.DistanceTo(pos);
+                if (d > _options.HazardRadiusM) continue;
+                if (result.Count == MaxNearbyHazards && d >= result[result.Count - 1].DistanceM) continue;
+
+                int at = result.Count;
+                while (at > 0 && result[at - 1].DistanceM > d) at--;
+                result.Insert(at, ToHazardInfo(zone, d));
+                if (result.Count > MaxNearbyHazards) result.RemoveAt(result.Count - 1);
+            }
+            return result;
         }
+
+        private static HazardInfo ToHazardInfo(HazardZone zone, double distanceM) => new HazardInfo
+        {
+            Type = zone.Type,
+            Severity = zone.Severity,
+            DistanceM = distanceM,
+            CenterX = zone.Center.X,
+            CenterZ = zone.Center.Z,
+            BoxMinX = zone.BoxMin.X,
+            BoxMinZ = zone.BoxMin.Z,
+            BoxMaxX = zone.BoxMax.X,
+            BoxMaxZ = zone.BoxMax.Z,
+            MaxSlopeDeg = zone.MaxSlopeDeg,
+            AreaM2 = zone.AreaM2,
+        };
 
         private LayerInfo BuildLayers(Point2 pos, out int visibleCount)
         {
@@ -307,7 +444,7 @@ namespace Marps.Engine.Navigation
                     Message = $"Solar storm ({req.SpaceWeather.Level ?? "no level"}). Seek shelter.",
                 });
 
-            if (hasTarget && resp.Route != null && !resp.Route.Found)
+            if (hasTarget && resp.Route != null && !resp.Route.Found && !resp.Route.Pending)
                 alerts.Add(new AlertInfo { Code = "NO_ROUTE", Severity = "danger", Message = "No safe route to the target." });
 
             return alerts;
@@ -334,6 +471,9 @@ namespace Marps.Engine.Navigation
             /// <summary>Value of the engine's use counter when this session was last used.</summary>
             public long LastUsed { get; set; }
 
+            /// <summary>True while a background search for this session is running.</summary>
+            public bool PlanPending { get; set; }
+
             /// <summary>Index of the current step. Previous steps are completed.</summary>
             public int Step { get; set; }
             public Point2 LastPos { get; set; }
@@ -342,9 +482,13 @@ namespace Marps.Engine.Navigation
             public RouteResult Route { get; set; }
             public List<double> Cumulative { get; } = new List<double>();
 
-            public void PrepareCumulative()
+            /// <summary>The route simplified once for the HUD (computed when the route is planned).</summary>
+            public List<Point2> Simplified { get; private set; } = new List<Point2>();
+
+            public void PrepareCumulative(double simplifyToleranceM)
             {
                 Cumulative.Clear();
+                Simplified = new List<Point2>();
                 if (Route == null || !Route.Found) return;
                 double acc = 0;
                 for (int i = 0; i < Route.Points.Count; i++)
@@ -352,6 +496,7 @@ namespace Marps.Engine.Navigation
                     if (i > 0) acc += Route.Points[i - 1].DistanceTo(Route.Points[i]);
                     Cumulative.Add(acc);
                 }
+                Simplified = PathSimplifier.Simplify(Route.Points, simplifyToleranceM);
             }
 
             /// <summary>Index of the route node closest to p, and the distance to it.</summary>
