@@ -24,6 +24,16 @@ namespace Marps.Engine.Terrain
             if (hazard == null || hazard.Length != n)
                 throw new ArgumentException($"Expected {n} hazard values.", nameof(hazard));
 
+            // Reject corrupt data here instead of letting it slip into slope checks: NaN makes every
+            // comparison false, and an unknown hazard code would be treated as walkable.
+            for (int i = 0; i < n; i++)
+            {
+                if (!float.IsFinite(heights[i]))
+                    throw new ArgumentException($"Height at index {i} is not a finite number.", nameof(heights));
+                if (hazard[i] > 3)
+                    throw new ArgumentException($"Hazard code {hazard[i]} at index {i} is not in 0..3.", nameof(hazard));
+            }
+
             Meta = meta;
             Width = meta.Width;
             Height = meta.Height;
