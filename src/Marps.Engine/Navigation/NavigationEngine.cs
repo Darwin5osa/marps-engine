@@ -87,18 +87,20 @@ namespace Marps.Engine.Navigation
         {
             // The worker owns its own router: AStarRouter reuses arrays and is not thread-safe.
             var workerRouter = new AStarRouter(_map, model, routeOptions);
-            _planJobs = new BlockingCollection<PlanJob>(MaxPendingPlans);
+            // The thread keeps its own reference: Dispose clears the field, possibly before the thread has started.
+            var jobs = new BlockingCollection<PlanJob>(MaxPendingPlans);
+            _planJobs = jobs;
             _planResults = new ConcurrentQueue<PlanJob>();
             _planWorker = new Thread(() =>
             {
-                foreach (var job in _planJobs.GetConsumingEnumerable())
+                foreach (var job in jobs.GetConsumingEnumerable())
                 {
                     // A session evicted while its job waited in the queue no longer needs the route.
                     if (!job.Session.Evicted)
                     {
                         try
                         {
-                            job.Result = workerRouter.Find(job.From, job.To);
+                            job.Result = FindSafe(workerRouter, job.From, job.To);
                         }
                         catch (Exception)
                         {
@@ -169,17 +171,34 @@ namespace Marps.Engine.Navigation
         /// <summary>Stops the background planner (no effect when background replanning is off).</summary>
         public void Dispose()
         {
-            if (_planJobs == null) return;
-            _planJobs.CompleteAdding();
-            _planWorker.Join(TimeSpan.FromSeconds(5));
-            _planJobs.Dispose();
-            _planJobs = null;
+            // Detach the queue under the lock: later calls see no worker and plan on the caller's thread.
+            BlockingCollection<PlanJob> jobs;
+            lock (_lock)
+            {
+                jobs = _planJobs;
+                _planJobs = null;
+            }
+            if (jobs == null) return;
+            jobs.CompleteAdding();
+            // Only free the queue once the worker has left it; a worker still busy after 5 s ends on its own.
+            if (_planWorker.Join(TimeSpan.FromSeconds(5))) jobs.Dispose();
+        }
+
+        /// <summary>
+        /// Route search that never guesses: a non-finite point (NaN or infinity) has no nearest node,
+        /// so it gives "not found" instead of a route from an arbitrary corner of the map.
+        /// </summary>
+        private static RouteResult FindSafe(AStarRouter router, Point2 from, Point2 to)
+        {
+            if (!double.IsFinite(from.X) || !double.IsFinite(from.Z) || !double.IsFinite(to.X) || !double.IsFinite(to.Z))
+                return RouteResult.NotFound(0, 0);
+            return router.Find(from, to);
         }
 
         /// <summary>Direct route between two points, without a session (for planning from tools).</summary>
         public RouteResult PlanRoute(Point2 from, Point2 to)
         {
-            lock (_lock) return _router.Find(from, to);
+            lock (_lock) return FindSafe(_router, from, to);
         }
 
         /// <summary>
@@ -199,7 +218,7 @@ namespace Marps.Engine.Navigation
                 Point2 current = from;
                 foreach (var target in targets)
                 {
-                    legs.Add(new ItineraryLeg { TargetId = target.Id, From = current, Route = _router.Find(current, target.Position) });
+                    legs.Add(new ItineraryLeg { TargetId = target.Id, From = current, Route = FindSafe(_router, current, target.Position) });
                     current = target.Position;
                 }
             }
@@ -244,7 +263,7 @@ namespace Marps.Engine.Navigation
                 Point2 current = new Point2(request.X, request.Z);
                 for (int i = 0; i < points.Count; i++)
                 {
-                    RouteResult r = _router.Find(current, points[i].Pos);
+                    RouteResult r = FindSafe(_router, current, points[i].Pos);
                     var leg = new TripLeg
                     {
                         Index = i,
@@ -304,6 +323,9 @@ namespace Marps.Engine.Navigation
             if (!stop.X.HasValue || !stop.Z.HasValue || !double.IsFinite(stop.X.Value) || !double.IsFinite(stop.Z.Value))
                 return $"{label} needs a place id or finite x and z.";
             pos = new Point2(stop.X.Value, stop.Z.Value);
+            // A point off the map would be clamped to the border, and the trip would claim to reach a place it never does.
+            if (!_map.IsInside(pos))
+                return $"{label} ({pos.X:0.#}, {pos.Z:0.#}) is outside the map.";
             return null;
         }
 
@@ -508,7 +530,8 @@ namespace Marps.Engine.Navigation
                         needPlan = offDist > _options.OffRouteM;
                     }
                     // The emergency route is computed at once, even in background mode: the HUD must not wait for it.
-                    if (needPlan && _options.BackgroundReplanning && !emergencyStarted)
+                    // After Dispose there is no worker (_planJobs is null) and planning falls back to this thread.
+                    if (needPlan && _planJobs != null && !emergencyStarted)
                     {
                         // Do not block: the search runs on the worker thread and is applied on a later call.
                         // Meanwhile the previous route (if any) is returned with Pending = true.
@@ -516,7 +539,7 @@ namespace Marps.Engine.Navigation
                     }
                     else if (needPlan)
                     {
-                        session.Route = _router.Find(pos, target.Position);
+                        session.Route = FindSafe(_router, pos, target.Position);
                         session.TargetId = target.Id;
                         session.PlanGeneration++;           // results of searches queued before this one are stale
                         session.PrepareCumulative(_options.PolylineToleranceM);

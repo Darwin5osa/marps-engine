@@ -139,6 +139,8 @@ Frontends depend on `Marps.Engine.Abstractions.INavigationEngine` (implemented b
 
 The convenience methods copy the request they are given; the caller's object is never changed.
 
+Points that are NaN or infinite never produce a route: `PlanRoute`, every itinerary leg and `Update` report "not found" (`NO_ROUTE`) instead of routing from an arbitrary node. Finite points off the map are clamped to the nearest border node (the response flags `OFF_MAP`). After `Dispose`, the engine keeps working and plans on the caller's thread.
+
 ### Trip planning (`PlanTrip`)
 
 Input (`TripRequest`):
@@ -154,7 +156,7 @@ Input (`TripRequest`):
 - A stop or destination is a mission place (`id`) or a free point (`x`, `z`). If both are sent, `id` wins. `stops` may be empty (direct route).
 - Output (`TripPlan`): `found` (every leg has a safe route), totals (`lengthM`, `estimatedMinutes`, `ascentM`, `descentM`, `maxSlopeDeg`), `legs[]` (`index`, `toId` — null for free points —, `fromX/Z`, `toX/Z`, `found`, statistics and `points`), the joined `points` from the current point to the destination, and `computeMs`.
 - A leg with no safe route has `found: false` and no points. The next leg still starts at that stop, so the rest of the trip is reported. The joined `points` is empty when any leg is missing.
-- Bad input (no destination, unknown id, a stop with neither id nor finite `x`/`z`, non-finite position) does not throw: `error` explains it and no search runs.
+- Bad input (no destination, unknown id, a stop with neither id nor finite `x`/`z`, a stop or destination outside the map, non-finite position) does not throw: `error` explains it and no search runs. The current position may be slightly off the map, as in navigation.
 - It does not touch any session: it is a plan, not navigation.
 
 ## Harness HTTP API (testing only)
