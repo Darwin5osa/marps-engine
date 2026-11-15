@@ -119,13 +119,27 @@ Example (position at base, looking east):
   - `EMERGENCY_RETURN` (danger, or info on arrival): emergency return to base is active.
   - `NO_BASE` (danger): emergency requested but the mission has no base.
   - `INVALID_STOP_ORDER` (warning): the `stopOrder` sent was rejected.
+  - `INVALID_POSITION` (danger): `x` or `z` is NaN or infinite. The sample is ignored: no stop is credited, the session keeps its last valid position and route, and the response has no `route`, `nextWaypoint` or `layers` (`position` is `0, 0` with `inside: false`). Commands in the same request (emergency, stop order) still apply.
+  - `INVALID_HEADING` (warning): `headingDeg` is NaN or infinite. Navigation goes on; `relativeBearingDeg` is 0 and the terrain-ahead check is skipped.
+  - `INVALID_WAYPOINT` (warning): `activeWaypointId` is not a stop of the mission. A stop that is already done is ignored silently (so it can be sent every frame).
+  - `HAZARD_AHEAD` precedence: blocked terrain (>22°) is always `danger`, even if rough terrain comes before it.
+- **Numbers**: every number in the response is finite (no NaN or infinity), so it always serializes to JSON. A non-finite `missionTimeS` is echoed as 0.
+- **No route**: when there is no safe route, the engine searches again only after the astronaut moves more than 15 m from where it last searched (or on `forceReplan`), not on every frame.
 - **Nearby hazards** (`hazards`): zones within 150 m, sorted by distance. `severity` = `high` if any slope exceeds 22°.
 - **Objectives** (`objectives[].status`): `done`, `active`, `pending`. The base appears on departure (step 0) and on return (last step).
 - **Layers** (`layers`): slope underfoot, hazard class, elevation, masts in line of sight.
 
 ## Engine interface: `INavigationEngine`
 
-Frontends depend on `Marps.Engine.Abstractions.INavigationEngine` (implemented by `NavigationEngine`, thread-safe), not on the concrete class. `NavigationService` also takes the interface.
+The engine is only reachable through `Marps.Engine.Abstractions.INavigationEngine` (thread-safe). Create it with the factory; the implementation class is internal:
+
+```csharp
+INavigationEngine engine = NavigationEngineFactory.Create(map, mission);   // options, walking model and route options are optional
+```
+
+`NavigationService` also takes the interface. Options are copied and validated at creation (an invalid value throws `ArgumentOutOfRangeException`); changing them later has no effect.
+
+**Immutable data.** `TerrainMap` copies the arrays it is built from and exposes the grid read-only (`HeightAt`, `HazardAt`, `SlopeAtNode`, or `CopyHeights` / `CopyHazard` / `CopySlopes` for textures); its `Meta` is frozen (use `Meta.Clone()` to build another map). `MissionDefinition` keeps frozen copies of its places and zones: setting a property on `engine.Mission.Find("P1")` or `engine.Base` throws, and later edits to the caller's own objects do not reach the mission. A mission rejects null places, empty or duplicate ids and non-finite positions.
 
 | member | use |
 |---|---|
@@ -136,10 +150,12 @@ Frontends depend on `Marps.Engine.Abstractions.INavigationEngine` (implemented b
 | `PlanRoute(from, to)` | safe route between two points, no session |
 | `PlanItinerary(from, placeIds)` | every leg through mission places, in order |
 | `PlanTrip(TripRequest)` / `PlanTrip(current, stops, destination)` | route from the current point through the stops to the destination (below) |
+| `GetCostField(placeId)` / `GetCostField(point)` | walking minutes from every node to a place or a free point (below) |
+| `SpeedAt(slopeDeg, uphill)` | horizontal walking speed (m/s) the time model assumes: ~1.2 m/s on flat ground |
 
 The convenience methods copy the request they are given; the caller's object is never changed.
 
-Points that are NaN or infinite never produce a route: `PlanRoute`, every itinerary leg and `Update` report "not found" (`NO_ROUTE`) instead of routing from an arbitrary node. Finite points off the map are clamped to the nearest border node (the response flags `OFF_MAP`). After `Dispose`, the engine keeps working and plans on the caller's thread.
+Points that are NaN or infinite never produce a route: `PlanRoute` and every itinerary leg report "not found", and `Update` reports `INVALID_POSITION`, instead of routing from an arbitrary node. Finite points off the map are clamped to the nearest border node (the response flags `OFF_MAP`). After `Dispose`, the engine keeps working and plans on the caller's thread.
 
 ### Trip planning (`PlanTrip`)
 
@@ -158,6 +174,21 @@ Input (`TripRequest`):
 - A leg with no safe route has `found: false` and no points. The next leg still starts at that stop, so the rest of the trip is reported. The joined `points` is empty when any leg is missing.
 - Bad input (no destination, unknown id, a stop with neither id nor finite `x`/`z`, a stop or destination outside the map, non-finite position) does not throw: `error` explains it and no search runs. The current position may be slightly off the map, as in navigation.
 - It does not touch any session: it is a plan, not navigation.
+
+### Cost field (`GetCostField`)
+
+Minutes of walking from **every** node of the map to one target, over the best safe route (same model and rules as the router). It is built once with a reverse Dijkstra; each query afterwards is a lookup, cheap enough for every frame.
+
+- `GetCostField(engine.Base.Id)` is the field for the O₂ features: **point of no return** = `field.MinutesAt(position) + 30 min` reserve; **walk-back contour** = nodes where `field.MinutesAtNode(c, r) <= O₂ left − reserve` (`CopyMinutes()` gives the whole grid, row 0 = north, same layout as the terrain).
+- Fields for mission places are cached; the first call for a place is a whole-map search (about 0.7 s on a desktop PC for the real grid, more on the headset: call it off the frame thread, e.g. at startup). Building a field never blocks `Update`. `GetCostField(point)` (e.g. a shelter) is not cached.
+- `MinutesAt(p)` returns +infinity when there is no safe route (or `p` is not finite); `IsReachable(p)` and `CanReachWithin(p, minutes)` wrap that. Points off the map use the nearest edge node, as the router does.
+- Values are the exact optimum, so they can be up to ~1 % below the `estimatedMinutes` of `PlanRoute`, which trades a little optimality for speed (heuristic weight 1.25).
+- Unknown place or null id → `ArgumentException` / `ArgumentNullException`; a free point that is not finite or is off the map → `ArgumentException`.
+
+## Libraries
+
+- `Marps.Engine` (netstandard2.1, **no package dependencies**): the engine, interfaces, contract types. Unity builds the map and the mission in memory with the `TerrainMap(meta, heights, hazard)` and `MissionDefinition(...)` constructors.
+- `Marps.Engine.Data` (netstandard2.1, `System.Text.Json`): `TerrainFiles`, `MissionLoader`, `FileTerrainProvider` and `MarpsJson` (camelCase, nulls omitted). Optional: only needed to load from disk or serialize to JSON.
 
 ## Harness HTTP API (testing only)
 

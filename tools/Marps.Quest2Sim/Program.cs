@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Text;
 using Marps.Engine.Abstractions;
+using Marps.Engine.Data;
 using Marps.Engine.Geometry;
 using Marps.Engine.Mission;
 using Marps.Engine.Navigation;
@@ -46,10 +47,10 @@ Console.WriteLine($"  .NET {Environment.Version}, {Environment.OSVersion}, works
 var terrain = TerrainFiles.Load(Path.Combine(dataDir, "processed"));
 var mission = MissionLoader.Load(Path.Combine(dataDir, "mission.json"), Path.Combine(dataDir, "hazards.json"), terrain.Meta);
 bool background = Arg(args, "--background", "false") == "true";
-INavigationEngine Make() => new NavigationEngine(terrain, mission, new NavigationOptions { BackgroundReplanning = background });
+INavigationEngine Make() => NavigationEngineFactory.Create(terrain, mission, new NavigationOptions { BackgroundReplanning = background });
 
 // Path the astronaut walks: B -> P1 -> P2 -> P3 -> P4 -> B, following the planned routes.
-INavigationEngine planner = new NavigationEngine(terrain, mission);
+INavigationEngine planner = NavigationEngineFactory.Create(terrain, mission);
 var path = new List<Point2>();
 var order = mission.ObjectiveIds;
 for (int i = 0; i < order.Count - 1; i++)

@@ -12,7 +12,7 @@ namespace Marps.Engine.Routing
     /// (measured between the two nodes of the step, not by sampling).
     /// Reuses its arrays between searches: one instance per thread.
     /// </summary>
-    public sealed class AStarRouter
+    internal sealed class AStarRouter
     {
         private static readonly int[] Dc = { 1, -1, 0, 0, 1, 1, -1, -1 };
         private static readonly int[] Dr = { 0, 0, 1, -1, 1, -1, 1, -1 };

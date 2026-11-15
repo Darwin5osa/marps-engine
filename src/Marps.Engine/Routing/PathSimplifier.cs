@@ -5,7 +5,7 @@ using Marps.Engine.Geometry;
 namespace Marps.Engine.Routing
 {
     /// <summary>Douglas-Peucker simplification (iterative) to reduce the points sent to the HUD.</summary>
-    public static class PathSimplifier
+    internal static class PathSimplifier
     {
         public static List<Point2> Simplify(IReadOnlyList<Point2> pts, double toleranceM)
         {

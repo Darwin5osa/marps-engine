@@ -8,8 +8,8 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using Marps.Engine.Abstractions;
+using Marps.Engine.Data;
 using Marps.Engine.Geometry;
-using Marps.Engine.Json;
 using Marps.Engine.Mission;
 using Marps.Engine.Navigation;
 using Marps.Engine.Routing;
@@ -23,7 +23,7 @@ var dataDir = ResolveDataDir();
 var processed = Path.Combine(dataDir, "processed");
 if (!File.Exists(Path.Combine(processed, "terrain.json")))
 {
-    Console.Error.WriteLine($"No encuentro {processed}\\terrain.json. Ejecutar: dotnet run --project tools/Marps.DataImport -- context");
+    Console.Error.WriteLine($"{processed}\\terrain.json not found. Run: dotnet run --project tools/Marps.DataImport -- context");
     return 1;
 }
 
@@ -31,17 +31,18 @@ ITerrainProvider terrainProvider = new FileTerrainProvider(processed);
 TerrainMap terrain = terrainProvider.Load();
 MissionDefinition mission = MissionLoader.Load(
     Path.Combine(dataDir, "mission.json"), Path.Combine(dataDir, "hazards.json"), terrain.Meta);
-INavigationEngine engine = new NavigationEngine(terrain, mission);
+INavigationEngine engine = NavigationEngineFactory.Create(terrain, mission);
 
 var sensor = new WebSensor();
 var sink = new LastHudSink();
 var service = new NavigationService(engine, sensor, sink, null);
 
 // Terrain layer for the page: hazard and slope per node (1 byte each, base64).
-var slopeBytes = new byte[terrain.SlopeDeg.Length];
+float[] slopes = terrain.CopySlopes();
+var slopeBytes = new byte[slopes.Length];
 for (int i = 0; i < slopeBytes.Length; i++)
-    slopeBytes[i] = (byte)Math.Min(255, Math.Round(terrain.SlopeDeg[i]));
-string hazardB64 = Convert.ToBase64String(terrain.Hazard);
+    slopeBytes[i] = (byte)Math.Min(255, Math.Round(slopes[i]));
+string hazardB64 = Convert.ToBase64String(terrain.CopyHazard());
 string slopeB64 = Convert.ToBase64String(slopeBytes);
 
 var referenceLegs = LoadReferenceLegs(Path.Combine(dataDir, "reference_routes.json"));
@@ -109,7 +110,7 @@ app.MapPost("/api/route", (RouteQuery q) =>
         expansions = r.Expansions,
         computeMs = r.ComputeMs,
         totalMs = clock.Elapsed.TotalMilliseconds,
-        points = PathSimplifier.Simplify(r.Points, 0.5),
+        points = r.SimplifiedPoints(0.5),
         nodes = r.Points.Count,
     }, MarpsJson.Options);
 });
@@ -149,7 +150,7 @@ app.MapPost("/api/itinerary", (ItineraryQuery q) =>
             lengthM = l.Route.HorizontalLengthM,
             minutes = l.Route.EstimatedMinutes,
             maxSlopeDeg = l.Route.MaxEdgeSlopeDeg,
-            points = PathSimplifier.Simplify(l.Route.Points, 1.0),
+            points = l.Route.SimplifiedPoints(1.0),
         }),
     }, MarpsJson.Options);
 });

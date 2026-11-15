@@ -3,10 +3,10 @@ using System.IO;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Marps.Engine.Json;
+using Marps.Engine.Mission;
 using Marps.Engine.Terrain;
 
-namespace Marps.Engine.Mission
+namespace Marps.Engine.Data
 {
     /// <summary>Reads mission.json and hazards.json and converts them to local meters.</summary>
     public static class MissionLoader
@@ -42,9 +42,11 @@ namespace Marps.Engine.Mission
         {
             var dtos = JsonSerializer.Deserialize<List<HazardZoneDto>>(File.ReadAllText(hazardJsonPath), MarpsJson.Options)
                        ?? new List<HazardZoneDto>();
-            return dtos.Select(d =>
+            return dtos.Where(d => d != null).Select(d =>
             {
                 // box = [ULX, ULY, LRX, LRY] in projection
+                if (d.Box == null || d.Box.Length != 4 || d.Center == null || d.Center.Length != 2)
+                    throw new InvalidDataException("hazards.json: every zone needs a 4-number box and a 2-number center.");
                 double ulx = d.Box[0], uly = d.Box[1], lrx = d.Box[2], lry = d.Box[3];
                 var min = meta.ProjectionToLocal(ulx, lry);
                 var max = meta.ProjectionToLocal(lrx, uly);

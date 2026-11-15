@@ -5,7 +5,7 @@ using Marps.Engine.Terrain;
 namespace Marps.Engine.Navigation
 {
     /// <summary>Line of sight over the terrain: the ray between two heights may not cross the ground.</summary>
-    public static class LineOfSight
+    internal static class LineOfSight
     {
         public static bool Clear(TerrainMap map, Point2 from, double fromHeightAboveGroundM,
             Point2 to, double toHeightAboveGroundM)

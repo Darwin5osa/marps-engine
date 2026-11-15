@@ -19,26 +19,39 @@ namespace Marps.Engine.Navigation
     /// With <see cref="NavigationOptions.BackgroundReplanning"/> the route search runs on a worker thread
     /// and the instance should be disposed when it is no longer used.
     /// </summary>
-    public sealed class NavigationEngine : INavigationEngine
+    /// <remarks>
+    /// Internal on purpose: frontends get an <see cref="INavigationEngine"/> from <see cref="NavigationEngineFactory"/>
+    /// and can only reach the engine through that interface.
+    /// </remarks>
+    internal sealed class NavigationEngine : INavigationEngine
     {
         private readonly TerrainMap _map;
         private readonly MissionDefinition _mission;
         private readonly NavigationOptions _options;
+        private readonly WalkingModel _model;
+        private readonly RouteOptions _routeOptions;
         private readonly AStarRouter _router;
         private readonly Dictionary<string, SessionState> _sessions = new Dictionary<string, SessionState>();
         private readonly object _lock = new object();
         private long _useCounter;
+
+        // Cost fields depend only on the immutable map and model, so they have their own lock: building one
+        // (a whole-map search) never blocks Update on the HUD thread.
+        private readonly object _fieldLock = new object();
+        private readonly Dictionary<string, Lazy<CostField>> _fields = new Dictionary<string, Lazy<CostField>>(StringComparer.Ordinal);
 
         public NavigationEngine(TerrainMap map, MissionDefinition mission,
             NavigationOptions options = null, WalkingModel model = null, RouteOptions routeOptions = null)
         {
             _map = map ?? throw new ArgumentNullException(nameof(map));
             _mission = mission ?? throw new ArgumentNullException(nameof(mission));
-            _options = options ?? new NavigationOptions();
-            if (routeOptions == null) routeOptions = new RouteOptions { MaxSlopeDeg = _options.MaxSlopeDeg };
-            _router = new AStarRouter(map, model, routeOptions);
+            // Private validated copies: options changed by the caller later cannot reach a running engine.
+            _options = (options ?? new NavigationOptions()).Snapshot();
+            _routeOptions = (routeOptions ?? new RouteOptions { MaxSlopeDeg = _options.MaxSlopeDeg }).Snapshot();
+            _model = model ?? WalkingModel.Fitted;
+            _router = new AStarRouter(map, _model, _routeOptions);
             _base = FindBase(mission);
-            if (_options.BackgroundReplanning) StartPlanWorker(model, routeOptions);
+            if (_options.BackgroundReplanning) StartPlanWorker(_model, _routeOptions);
         }
 
         public TerrainMap Map => _map;
@@ -48,6 +61,35 @@ namespace Marps.Engine.Navigation
         public Waypoint Base => _base;
 
         private readonly Waypoint _base;
+
+        public double SpeedAt(double slopeDeg, bool uphill) => _model.SpeedAt(slopeDeg, uphill);
+
+        public CostField GetCostField(string placeId)
+        {
+            if (placeId == null) throw new ArgumentNullException(nameof(placeId));
+            var place = _mission.Find(placeId) ?? throw new ArgumentException($"Unknown place '{placeId}'.", nameof(placeId));
+            Lazy<CostField> field;
+            lock (_fieldLock)
+            {
+                if (!_fields.TryGetValue(place.Id, out field))
+                {
+                    // Built once per place, outside the lock; concurrent callers wait for the same build.
+                    field = new Lazy<CostField>(() => CostField.Build(_map, _model, _routeOptions, place.Id, place.Position),
+                        LazyThreadSafetyMode.ExecutionAndPublication);
+                    _fields.Add(place.Id, field);
+                }
+            }
+            return field.Value;
+        }
+
+        public CostField GetCostField(Point2 target)
+        {
+            if (!double.IsFinite(target.X) || !double.IsFinite(target.Z))
+                throw new ArgumentException("The target must be finite numbers.", nameof(target));
+            if (!_map.IsInside(target))
+                throw new ArgumentException($"The target ({target.X:0.#}, {target.Z:0.#}) is outside the map.", nameof(target));
+            return CostField.Build(_map, _model, _routeOptions, null, target);
+        }
 
         /// <summary>
         /// The emergency base: the departure step if it is a base, else the final step if it is one,
@@ -161,6 +203,7 @@ namespace Marps.Engine.Navigation
                 }
                 s.Route = job.Result;
                 s.TargetId = job.TargetId;
+                s.PlannedFrom = job.From;
                 s.PrepareCumulative(_options.PolylineToleranceM);
                 s.PlanPending = false;
                 if (job.SessionId == sessionId) forThisSession = true;
@@ -436,22 +479,48 @@ namespace Marps.Engine.Navigation
                 }
                 session.LastUsed = ++_useCounter;
 
-                var pos = new Point2(req.X, req.Z);
+                // A non-finite position (NaN or infinity) is a broken sample: it must never credit a stop
+                // (NaN distances compare as "within reach"), move the session or reach the response as NaN,
+                // which JSON cannot carry. Commands such as the emergency button are still applied.
+                bool validPos = double.IsFinite(req.X) && double.IsFinite(req.Z);
+                bool validHeading = double.IsFinite(req.HeadingDeg);
+                var pos = validPos ? new Point2(req.X, req.Z) : default(Point2);
                 var response = new NavigationResponse
                 {
                     SessionId = sid,
-                    MissionTimeS = req.MissionTimeS,
+                    MissionTimeS = double.IsFinite(req.MissionTimeS) ? req.MissionTimeS : 0,
                     Position = new PositionInfo
                     {
-                        X = req.X,
-                        Z = req.Z,
-                        Inside = _map.IsInside(pos),
-                        ElevationM = _map.ElevationAt(pos),
+                        X = pos.X,
+                        Z = pos.Z,
+                        Inside = validPos && _map.IsInside(pos),
+                        ElevationM = validPos ? _map.ElevationAt(pos) : 0,
                     },
                 };
 
                 var steps = session.Order;
                 var commandAlerts = new List<AlertInfo>();
+                if (!validPos)
+                    commandAlerts.Add(new AlertInfo
+                    {
+                        Code = "INVALID_POSITION",
+                        Severity = "danger",
+                        Message = "The position is not a finite number: the sample was ignored.",
+                    });
+                if (!validHeading)
+                    commandAlerts.Add(new AlertInfo
+                    {
+                        Code = "INVALID_HEADING",
+                        Severity = "warning",
+                        Message = "The heading is not a finite number: relative bearing and terrain ahead are not available.",
+                    });
+                if (!string.IsNullOrEmpty(req.ActiveWaypointId) && !_mission.HasObjective(req.ActiveWaypointId))
+                    commandAlerts.Add(new AlertInfo
+                    {
+                        Code = "INVALID_WAYPOINT",
+                        Severity = "warning",
+                        Message = $"'{req.ActiveWaypointId}' is not a stop of this mission.",
+                    });
 
                 // 0. Commands: emergency on / off and a new stop order.
                 bool emergencyStarted = false;
@@ -488,18 +557,21 @@ namespace Marps.Engine.Navigation
                 Point2 previous = session.HasLast ? session.LastPos : pos;
                 bool firstStep = true;
                 // In an emergency nothing is credited: passing by a stop on the way home does not complete it.
-                while (!session.Emergency && session.Step < steps.Count)
+                while (validPos && !session.Emergency && session.Step < steps.Count)
                 {
                     var stepPos = _mission.Find(steps[session.Step]).Position;
                     double d = firstStep
                         ? PathSimplifier.DistanceToSegment(stepPos, previous, pos)
                         : pos.DistanceTo(stepPos);
-                    if (d > _options.ReachRadiusM) break;
+                    if (!(d <= _options.ReachRadiusM)) break;
                     session.Step++;
                     firstStep = false;
                 }
-                session.LastPos = pos;
-                session.HasLast = true;
+                if (validPos)
+                {
+                    session.LastPos = pos;
+                    session.HasLast = true;
+                }
 
                 // 2. The astronaut can jump to a later step with that id (e.g. return to base "B").
                 if (!session.Emergency && !string.IsNullOrEmpty(req.ActiveWaypointId))
@@ -521,17 +593,29 @@ namespace Marps.Engine.Navigation
 
                 // 3. Route: recalculated if the target changed, if requested, or if the astronaut moved away from the route.
                 bool replanned = ApplyCompletedPlans(sid);
-                if (target != null)
+                if (target != null && !validPos)
+                {
+                    // Nothing can be planned or measured from an unknown position; the session keeps its route.
+                }
+                else if (target != null)
                 {
                     bool needPlan = session.Route == null || session.TargetId != target.Id || req.ForceReplan || emergencyStarted;
-                    if (!needPlan)
+                    if (!needPlan && !session.Route.Found)
+                    {
+                        // No safe route from where it was last searched: search again only after a real move,
+                        // not on every frame (a failed search explores the whole reachable map).
+                        needPlan = pos.DistanceTo(session.PlannedFrom) > _options.OffRouteM;
+                    }
+                    else if (!needPlan)
                     {
                         session.Nearest(pos, out _, out double offDist);
                         needPlan = offDist > _options.OffRouteM;
                     }
                     // The emergency route is computed at once, even in background mode: the HUD must not wait for it.
                     // After Dispose there is no worker (_planJobs is null) and planning falls back to this thread.
-                    if (needPlan && _planJobs != null && !emergencyStarted)
+                    // That also covers an emergency started during a broken sample: the first valid one routes home at once.
+                    bool urgent = emergencyStarted || (session.Emergency && session.TargetId != target.Id);
+                    if (needPlan && _planJobs != null && !urgent)
                     {
                         // Do not block: the search runs on the worker thread and is applied on a later call.
                         // Meanwhile the previous route (if any) is returned with Pending = true.
@@ -541,6 +625,7 @@ namespace Marps.Engine.Navigation
                     {
                         session.Route = FindSafe(_router, pos, target.Position);
                         session.TargetId = target.Id;
+                        session.PlannedFrom = pos;
                         session.PlanGeneration++;           // results of searches queued before this one are stale
                         session.PrepareCumulative(_options.PolylineToleranceM);
                         replanned = true;
@@ -548,7 +633,7 @@ namespace Marps.Engine.Navigation
 
                     response.Route = BuildRouteInfo(session, target, pos, replanned);
                     response.Route.Pending = session.PlanPending;
-                    response.NextWaypoint = BuildNextWaypoint(target, pos, req.HeadingDeg);
+                    response.NextWaypoint = BuildNextWaypoint(target, pos, validHeading ? req.HeadingDeg : (double?)null);
                 }
                 else
                 {
@@ -579,21 +664,24 @@ namespace Marps.Engine.Navigation
                     });
                 }
 
-                response.Hazards = NearbyHazards(pos);
-                response.Layers = BuildLayers(pos, out int visible);
-                response.Layers.VisibleAntennas = visible;
+                if (validPos)
+                {
+                    response.Hazards = NearbyHazards(pos);
+                    response.Layers = BuildLayers(pos, out int visible);
+                    response.Layers.VisibleAntennas = visible;
+                }
                 if (session.Emergency)
                 {
                     response.Emergency = new EmergencyInfo
                     {
                         Active = true,
                         BaseId = _base.Id,
-                        Arrived = pos.DistanceTo(_base.Position) <= _options.ReachRadiusM,
+                        Arrived = validPos && pos.DistanceTo(_base.Position) <= _options.ReachRadiusM,
                         ActivatedAtS = session.EmergencySinceS,
                     };
                 }
 
-                response.Alerts = BuildAlerts(req, pos, response, target != null);
+                response.Alerts = BuildAlerts(req, pos, response, target != null, validPos && validHeading);
                 response.Alerts.AddRange(commandAlerts);
 
                 clock.Stop();
@@ -649,7 +737,8 @@ namespace Marps.Engine.Navigation
             return best;
         }
 
-        private NextWaypointInfo BuildNextWaypoint(Waypoint target, Point2 pos, double headingDeg)
+        /// <summary>Next target info. Without a valid heading the relative bearing is 0 (an INVALID_HEADING alert says why).</summary>
+        private NextWaypointInfo BuildNextWaypoint(Waypoint target, Point2 pos, double? headingDeg)
         {
             double bearing = Bearing.Between(pos, target.Position);
             return new NextWaypointInfo
@@ -661,7 +750,7 @@ namespace Marps.Engine.Navigation
                 Z = target.Position.Z,
                 DistanceM = pos.DistanceTo(target.Position),
                 BearingDeg = bearing,
-                RelativeBearingDeg = Bearing.Relative(bearing, headingDeg),
+                RelativeBearingDeg = headingDeg.HasValue ? Bearing.Relative(bearing, headingDeg.Value) : 0,
             };
         }
 
@@ -723,7 +812,7 @@ namespace Marps.Engine.Navigation
             return layers;
         }
 
-        private List<AlertInfo> BuildAlerts(NavigationRequest req, Point2 pos, NavigationResponse resp, bool hasTarget)
+        private List<AlertInfo> BuildAlerts(NavigationRequest req, Point2 pos, NavigationResponse resp, bool hasTarget, bool canLookAhead)
         {
             var alerts = new List<AlertInfo>();
 
@@ -745,33 +834,39 @@ namespace Marps.Engine.Navigation
             if (!resp.Position.Inside)
                 alerts.Add(new AlertInfo { Code = "OFF_MAP", Severity = "warning", Message = "Outside the map area." });
 
-            // Terrain ahead, following the look direction.
-            double rad = req.HeadingDeg * Math.PI / 180.0;
-            double ex = Math.Sin(rad), nz = Math.Cos(rad);
+            // Terrain ahead, following the look direction. Blocked terrain (code 2) outranks rough terrain
+            // (code 3) even though its code is lower, so the two are tracked apart rather than with max().
             double worstSlope = 0;
-            int worstHazard = 0;
-            for (double d = 0; d <= _options.LookAheadM; d += _map.Cell)
+            bool blockedAhead = false, roughAhead = false;
+            if (canLookAhead)
             {
-                var p = new Point2(pos.X + ex * d, pos.Z + nz * d);
-                if (!_map.IsInside(p)) break;
-                _map.NearestNode(p, out int c, out int r);
-                int idx = _map.Index(c, r);
-                worstSlope = Math.Max(worstSlope, _map.SlopeDeg[idx]);
-                worstHazard = Math.Max(worstHazard, _map.Hazard[idx]);
+                double rad = req.HeadingDeg * Math.PI / 180.0;
+                double ex = Math.Sin(rad), nz = Math.Cos(rad);
+                for (double d = 0; d <= _options.LookAheadM; d += _map.Cell)
+                {
+                    var p = new Point2(pos.X + ex * d, pos.Z + nz * d);
+                    if (!_map.IsInside(p)) break;
+                    _map.NearestNode(p, out int c, out int r);
+                    int idx = _map.Index(c, r);
+                    worstSlope = Math.Max(worstSlope, _map.SlopeDeg[idx]);
+                    byte code = _map.Hazard[idx];
+                    if (code == 2) blockedAhead = true;
+                    else if (code == 3) roughAhead = true;
+                }
             }
-            if (worstHazard == 2)
+            if (blockedAhead)
                 alerts.Add(new AlertInfo
                 {
                     Code = "HAZARD_AHEAD",
                     Severity = "danger",
                     Message = $"Slope up to {worstSlope:0}° in the next {_options.LookAheadM:0} m.",
                 });
-            else if (worstHazard == 3)
+            else if (roughAhead)
                 alerts.Add(new AlertInfo
                 {
                     Code = "HAZARD_AHEAD",
                     Severity = "warning",
-                    Message = "Zona rugosa adelante.",
+                    Message = "Rough terrain ahead.",
                 });
             else if (worstSlope >= _options.WarnSlopeDeg)
                 alerts.Add(new AlertInfo
@@ -851,6 +946,9 @@ namespace Marps.Engine.Navigation
             public long PlanGeneration { get; set; }
             public Point2 LastPos { get; set; }
             public bool HasLast { get; set; }
+
+            /// <summary>Where the current route was searched from (used to retry a failed search only after a move).</summary>
+            public Point2 PlannedFrom { get; set; }
             public string TargetId { get; set; }
             public RouteResult Route { get; set; }
             public List<double> Cumulative { get; } = new List<double>();

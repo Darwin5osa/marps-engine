@@ -1,6 +1,7 @@
 using Marps.Engine.Abstractions;
+using Marps.Engine.Terrain;
 
-namespace Marps.Engine.Terrain
+namespace Marps.Engine.Data
 {
     /// <summary>Terrain provider that reads the processed data folder.</summary>
     public sealed class FileTerrainProvider : ITerrainProvider
