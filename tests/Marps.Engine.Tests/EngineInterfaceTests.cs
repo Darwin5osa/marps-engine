@@ -126,6 +126,9 @@ namespace Marps.Engine.Tests
             public List<ItineraryLeg> PlanItinerary(Point2 from, IEnumerable<string> placeIds) => new List<ItineraryLeg>();
             public TripPlan PlanTrip(TripRequest request) => new TripPlan();
             public TripPlan PlanTrip(Point2 current, IEnumerable<Point2> stops, Point2 destination) => new TripPlan();
+            public CostField GetCostField(string placeId) => null;
+            public CostField GetCostField(Point2 target) => null;
+            public double SpeedAt(double slopeDeg, bool uphill) => 1.0;
             public void Dispose() { }
         }
     }

@@ -11,5 +11,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\src\Marps.Engine\Marps.Engine.csproj" />
+    <ProjectReference Include="..\..\src\Marps.Engine.Data\Marps.Engine.Data.csproj" />
   </ItemGroup>
 </Project>

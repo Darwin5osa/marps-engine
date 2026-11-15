@@ -9,12 +9,16 @@ using Marps.Engine.Terrain;
 namespace Marps.Engine.Abstractions
 {
     /// <summary>
-    /// Everything a frontend (Unity, web, hardware) can ask the navigation engine. Frontends should depend on
-    /// this interface, not on <see cref="NavigationEngine"/>. Implementations are thread-safe.
+    /// Everything a frontend (Unity, web, hardware) can ask the navigation engine. Get one from
+    /// <see cref="NavigationEngineFactory.Create"/>: the implementation is internal, so this interface is the only
+    /// way in. Implementations are thread-safe.
     /// </summary>
     public interface INavigationEngine : IDisposable
     {
+        /// <summary>The terrain (immutable: readable per node or as copies).</summary>
         TerrainMap Map { get; }
+
+        /// <summary>The mission (immutable: its places and zones are frozen).</summary>
         MissionDefinition Mission { get; }
 
         /// <summary>The base used for emergency return, or null if the mission has none.</summary>
@@ -49,6 +53,27 @@ namespace Marps.Engine.Abstractions
 
         /// <summary>Same as <see cref="PlanTrip(TripRequest)"/> with free points.</summary>
         TripPlan PlanTrip(Point2 current, IEnumerable<Point2> stops, Point2 destination);
+
+        /// <summary>
+        /// Walking minutes from every node to a mission place (e.g. <c>Base.Id</c>), for the O₂ point of no return
+        /// and the walk-back contour. Built on the first call for each place (a whole-map search: about 0.7 s on a
+        /// desktop PC for the real 1025x1025 grid, several times more on a Quest 2, so call it off the frame thread,
+        /// e.g. at startup) and cached; building it never blocks <see cref="Update"/>.
+        /// Throws <see cref="ArgumentException"/> for an unknown place.
+        /// </summary>
+        CostField GetCostField(string placeId);
+
+        /// <summary>
+        /// Same as <see cref="GetCostField(string)"/> for a free point inside the map (e.g. a shelter). Not cached.
+        /// Throws <see cref="ArgumentException"/> for a non-finite point or one outside the map.
+        /// </summary>
+        CostField GetCostField(Point2 target);
+
+        /// <summary>
+        /// Horizontal walking speed (m/s) the engine's time model assumes on a slope, going up or down, so the
+        /// player can walk at the speed the time estimates use. About 1.2 m/s on flat ground.
+        /// </summary>
+        double SpeedAt(double slopeDeg, bool uphill);
     }
 
     /// <summary>

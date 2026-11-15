@@ -3,7 +3,7 @@ using Marps.Engine.Routing;
 
 namespace Marps.Engine.Navigation
 {
-    /// <summary>One leg of an itinerary planned with <see cref="NavigationEngine.PlanItinerary"/>.</summary>
+    /// <summary>One leg of an itinerary planned with <see cref="Abstractions.INavigationEngine.PlanItinerary"/>.</summary>
     public sealed class ItineraryLeg
     {
         /// <summary>Id of the place this leg ends at.</summary>

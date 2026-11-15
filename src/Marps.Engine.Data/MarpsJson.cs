@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Marps.Engine.Json
+namespace Marps.Engine.Data
 {
     /// <summary>JSON options for the contract (camelCase, nulls omitted). The same shapes work for Unity.</summary>
     public static class MarpsJson

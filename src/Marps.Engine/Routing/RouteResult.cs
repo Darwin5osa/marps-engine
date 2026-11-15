@@ -24,6 +24,10 @@ namespace Marps.Engine.Routing
 
         public double ComputeMs { get; set; }
 
+        /// <summary>The route polyline simplified to <paramref name="toleranceM"/> meters (Douglas-Peucker), for drawing.</summary>
+        public List<Point2> SimplifiedPoints(double toleranceM = 0.5) =>
+            PathSimplifier.Simplify(Points ?? new List<Point2>(), toleranceM);
+
         public static RouteResult NotFound(int expansions, double computeMs) =>
             new RouteResult { Found = false, Expansions = expansions, ComputeMs = computeMs };
     }

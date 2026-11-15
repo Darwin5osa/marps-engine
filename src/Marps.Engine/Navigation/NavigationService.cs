@@ -9,7 +9,7 @@ namespace Marps.Engine.Navigation
     ///
     /// Faults in the sensor, the weather provider or the HUD sink do not stop the loop. Each one is counted,
     /// reported as an alert in the response, and the service keeps running. A missing or invalid sensor reading
-    /// yields a response that carries a SENSOR_FAULT alert and no route.
+    /// yields a response that carries a SENSOR_FAULT alert and no route; an exception inside the engine gives ENGINE_FAULT.
     /// </summary>
     public sealed class NavigationService
     {
@@ -32,6 +32,9 @@ namespace Marps.Engine.Navigation
 
         /// <summary>Number of steps where the weather provider threw.</summary>
         public int WeatherFaults { get; private set; }
+
+        /// <summary>Number of steps where the engine itself threw (a bug: reported, never allowed to stop the loop).</summary>
+        public int EngineFaults { get; private set; }
 
         /// <summary>Number of HUD publications that threw.</summary>
         public int SinkFaults { get; private set; }
@@ -70,7 +73,21 @@ namespace Marps.Engine.Navigation
                 }
             }
 
-            NavigationResponse response = _engine.Update(request);
+            NavigationResponse response;
+            try
+            {
+                response = _engine.Update(request);
+            }
+            catch (Exception ex)
+            {
+                EngineFaults++;
+                return Fault("ENGINE_FAULT", "Navigation engine error: the step was skipped.", ex, sensor: false, sessionId: request.SessionId);
+            }
+            if (response == null)
+            {
+                EngineFaults++;
+                return Fault("ENGINE_FAULT", "Navigation engine returned no response.", null, sensor: false, sessionId: request.SessionId);
+            }
             if (weatherAlert != null)
                 response.Alerts.Add(new AlertInfo { Code = "WEATHER_UNAVAILABLE", Severity = "info", Message = weatherAlert });
 
@@ -90,14 +107,14 @@ namespace Marps.Engine.Navigation
             return response;
         }
 
-        private NavigationResponse Fault(string code, string message, Exception ex, bool sensor)
+        private NavigationResponse Fault(string code, string message, Exception ex, bool sensor, string sessionId = null)
         {
             if (sensor) SensorFaults++;
             LastError = ex?.Message ?? message;
 
             var response = new NavigationResponse
             {
-                SessionId = "default",
+                SessionId = string.IsNullOrEmpty(sessionId) ? "default" : sessionId,
                 Alerts = { new AlertInfo { Code = code, Severity = "danger", Message = message } },
             };
             try

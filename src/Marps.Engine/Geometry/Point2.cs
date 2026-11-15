@@ -1,5 +1,4 @@
 using System;
-using System.Text.Json.Serialization;
 
 namespace Marps.Engine.Geometry
 {
@@ -9,10 +8,8 @@ namespace Marps.Engine.Geometry
     /// </summary>
     public struct Point2
     {
-        [JsonPropertyName("x")]
         public double X { get; set; }
 
-        [JsonPropertyName("z")]
         public double Z { get; set; }
 
         public Point2(double x, double z)

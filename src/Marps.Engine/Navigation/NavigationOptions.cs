@@ -45,5 +45,30 @@ namespace Marps.Engine.Navigation
         /// returns the up-to-date route.
         /// </summary>
         public bool BackgroundReplanning { get; set; } = false;
+
+        /// <summary>
+        /// A validated copy. The engine keeps it instead of the caller's object, so changing the options later
+        /// (possibly from another thread) has no effect on a running engine.
+        /// </summary>
+        internal NavigationOptions Snapshot()
+        {
+            NonNegative(ReachRadiusM, nameof(ReachRadiusM));
+            NonNegative(OffRouteM, nameof(OffRouteM));
+            NonNegative(HazardRadiusM, nameof(HazardRadiusM));
+            NonNegative(LookAheadM, nameof(LookAheadM));
+            NonNegative(WarnSlopeDeg, nameof(WarnSlopeDeg));
+            NonNegative(EyeHeightM, nameof(EyeHeightM));
+            NonNegative(AntennaHeightM, nameof(AntennaHeightM));
+            NonNegative(PolylineToleranceM, nameof(PolylineToleranceM));
+            if (!(MaxSlopeDeg > 0 && MaxSlopeDeg < 90))
+                throw new System.ArgumentOutOfRangeException(nameof(MaxSlopeDeg), "Must be between 0 and 90 degrees (exclusive).");
+            return (NavigationOptions)MemberwiseClone();
+        }
+
+        private static void NonNegative(double v, string name)
+        {
+            if (!(v >= 0) || double.IsInfinity(v))
+                throw new System.ArgumentOutOfRangeException(name, "Must be a finite number >= 0.");
+        }
     }
 }
